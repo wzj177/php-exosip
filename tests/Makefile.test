@@ -1,0 +1,57 @@
+# eXosip2 独立测试程序 Makefile
+
+CC = gcc
+CFLAGS = -g -O0 -Wall
+INCLUDES = -I./libs/include -I./libs/include/eXosip2 -I./libs/include/osip2 -I./libs/include/osipparser2
+LDFLAGS = -L./libs/lib
+
+# 检测操作系统
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Darwin)
+    # macOS - 不使用 -lrt -ldl -lcares
+    LIBS = -leXosip2 -losip2 -losipparser2 -lresolv -lpthread
+else ifeq ($(UNAME_S),Linux)
+    # Linux - 使用所有库
+    LIBS = -leXosip2 -losip2 -losipparser2 -lresolv -lpthread -lrt -ldl
+    # 检查是否有 libcares
+    ifneq ($(shell ldconfig -p 2>/dev/null | grep -c libcares),0)
+        LIBS += -lcares
+    endif
+else
+    # 其他系统 - 尝试所有库
+    LIBS = -leXosip2 -losip2 -losipparser2 -lresolv -lpthread -lrt -ldl -lcares
+endif
+
+TARGET_TCP = test_exosip_tcp
+TARGET_UDP = test_exosip_udp
+TARGET_CLIENT = sip_client_test
+TARGETS = $(TARGET_TCP) $(TARGET_UDP) $(TARGET_CLIENT)
+all: $(TARGETS)
+
+$(TARGET_TCP): test_exosip_tcp.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $(TARGET_TCP) test_exosip_tcp.c $(LDFLAGS) $(LIBS)
+
+$(TARGET_UDP): test_exosip_udp.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $(TARGET_UDP) test_exosip_udp.c $(LDFLAGS) $(LIBS)
+
+$(TARGET_CLIENT): sip_client_test.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $(TARGET_CLIENT) sip_client_test.c $(LDFLAGS) $(LIBS)
+
+clean:
+	rm -f $(TARGETS)
+
+tcp: $(TARGET_TCP)
+	./$(TARGET_TCP)
+
+udp: $(TARGET_UDP)
+	./$(TARGET_UDP)
+
+client: $(TARGET_CLIENT)
+	./$(TARGET_CLIENT)
+
+client-tcp: $(TARGET_CLIENT)
+	./$(TARGET_CLIENT) tcp
+
+.PHONY: all clean tcp udp client client-tcp
+

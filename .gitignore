@@ -1,0 +1,102 @@
+# ============================================
+# PHP Extension 编译产物
+# ============================================
+*.o
+*.lo
+*.la
+*.so
+*.dylib
+*.a
+.libs/
+.deps/
+modules/
+
+# Autotools 生成文件
+autom4te.cache/
+config.h
+config.h.in
+config.log
+config.status
+config.cache
+config.nice
+configure
+aclocal.m4
+libtool
+Makefile
+Makefile.fragments
+Makefile.objects
+Makefile.global
+run-tests.php
+
+# ============================================
+# 编译临时文件
+# ============================================
+*.dSYM/
+core
+core.*
+*.core
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 测试和调试文件
+crash_log.txt
+gb28181_client_crash_log.txt
+sip_client_test
+test_exosip_udp
+debug_server.sh
+get_crash_stack.sh
+
+# ============================================
+# 示例和文档（保留必要的）
+# ============================================
+# 隐藏大型示例项目
+examples/GB28181-Service/
+examples/webrtc-demo/
+examples/protocol/
+
+# 隐藏测试和调试示例
+examples/test_*.php
+examples/exosip_wrapper_v1.c
+examples/ua.c
+examples/SipServer.cpp
+examples/ARCHITECTURE.md
+
+# ============================================
+# 第三方库编译目录
+# ============================================
+osip-build/build_osip_src/
+osip-build/libs/
+osip-build/libs-530/
+
+# ============================================
+# IDE 和编辑器配置
+# ============================================
+.vscode/
+.idea/
+.cursor/
+*.sublime-project
+*.sublime-workspace
+
+# ============================================
+# 备份和原始文件
+# ============================================
+*_original.c
+*_original.h
+*.bak
+*.backup
+*_old
+
+# ============================================
+# PHP 临时文件
+# ============================================
+vendor/
+composer.lock
+test_fix.php
+
+# ============================================
+# 构建脚本（保留主要的）
+# ============================================
+# 保留：build_macos_fix.sh, build_centos_complete.sh
+link_fix.sh
