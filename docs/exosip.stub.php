@@ -156,6 +156,78 @@ class ExoSip {
      */
     public $onClose;
     
+    /* ========== Master-Worker-Task Callbacks ========== */
+    
+    /**
+     * Task handler - Execute async tasks in Task process
+     * Runs in Task process, handles time-consuming operations (HTTP, DB, Redis)
+     * @var callable(int $taskId, array $data): mixed
+     * 
+     * @example
+     * ```php
+     * $sip->onTask = function($taskId, $data) {
+     *     $type = $data['type'] ?? 'unknown';
+     *     $payload = $data['payload'] ?? [];
+     *     
+     *     switch ($type) {
+     *         case 'webhook':
+     *             $result = file_get_contents($payload['url'], false, stream_context_create([
+     *                 'http' => ['method' => 'POST', 'timeout' => 5]
+     *             ]));
+     *             return ['success' => true, 'response' => $result];
+     *             
+     *         case 'save_catalog':
+     *             $db = new PDO(...);
+     *             $stmt = $db->prepare("INSERT INTO catalog ...");
+     *             $stmt->execute($payload);
+     *             return ['success' => true];
+     *             
+     *         default:
+     *             return ['success' => false, 'error' => 'Unknown task'];
+     *     }
+     * };
+     * ```
+     */
+    public $onTask;
+    
+    /**
+     * Task finish handler - Receive task results in Worker process
+     * Runs in Worker process, automatically triggered when onTask returns
+     * @var callable(int $taskId, mixed $result): void
+     * 
+     * @example
+     * ```php
+     * $sip->onTaskFinish = function($taskId, $result) {
+     *     if ($result['success']) {
+     *         echo "Task #{$taskId} completed successfully\n";
+     *     } else {
+     *         echo "Task #{$taskId} failed: {$result['error']}\n";
+     *     }
+     * };
+     * ```
+     */
+    public $onTaskFinish;
+    
+    /**
+     * Timer handler - Periodic execution in Worker process
+     * Runs in Worker process, triggered at configured interval
+     * @var callable(): bool
+     * 
+     * @example
+     * ```php
+     * $sip->onTimer = function() use ($gb28181) {
+     *     // Check device timeouts
+     *     $timeoutDevices = $gb28181->processTimeouts();
+     *     
+     *     // Cleanup expired data
+     *     $gb28181->cleanupExpiredData();
+     *     
+     *     return true;  // Continue timer, false to stop
+     * };
+     * ```
+     */
+    public $onTimer;
+    
     /**
      * Create and optionally initialize SIP server
      * 
@@ -170,13 +242,29 @@ class ExoSip {
      *   - sipTimeout: int - Transaction timeout in seconds (default: 30)
      *   - sipExpiry: int - Registration expiry in seconds (default: 3600)
      * 
+     * Master-Worker-Task Configuration (optional):
+     *   - task_worker_num: int - Number of Task processes (default: 4)
+     *   - timer_interval: int - Timer interval in milliseconds (default: 1000)
+     *   - pid_file: string - PID file path (e.g., '/tmp/server.pid')
+     * 
      * @example
      * ```php
+     * // Single process mode
      * $sip = new ExoSip([
      *     'host' => '0.0.0.0',
      *     'port' => 5060,
      *     'mode' => 'TCP',
      *     'sipId' => '34020000002000000001'
+     * ]);
+     * 
+     * // Master-Worker-Task mode
+     * $sip = new ExoSip([
+     *     'host' => '0.0.0.0',
+     *     'port' => 5060,
+     *     'mode' => 'UDP',
+     *     'task_worker_num' => 4,
+     *     'timer_interval' => 30000,  // 30 seconds
+     *     'pid_file' => '/tmp/gb28181_server.pid',
      * ]);
      * ```
      */
@@ -361,6 +449,105 @@ class ExoSip {
      * ```
      */
     public function getStats(): array {}
+    
+    /* ========== Master-Worker-Task Methods ========== */
+    
+    /**
+     * Add async task to Task process pool (Worker process only)
+     * 
+     * @param array $data Task data (must be array, will be passed to onTask callback)
+     * @return int Task ID (auto-increment integer), or -1 on failure
+     * 
+     * @throws Exception If called in Master or Task process
+     * 
+     * @example
+     * ```php
+     * // In SIP event handler (Worker process)
+     * $sip->onRegister = function($event) use ($sip) {
+     *     $deviceId = extractDeviceId($event->getFromUri());
+     *     
+     *     // Post webhook task
+     *     $taskId = $sip->addTask([
+     *         'type' => 'webhook',
+     *         'payload' => [
+     *             'url' => 'http://api.example.com/device/register',
+     *             'data' => [
+     *                 'device_id' => $deviceId,
+     *                 'timestamp' => time(),
+     *             ]
+     *         ]
+     *     ]);
+     *     
+     *     echo "Task #{$taskId} posted\n";
+     *     
+     *     // Continue processing (non-blocking)
+     *     $sip->sendResponse($event->getTid(), 200, 'OK');
+     * };
+     * ```
+     */
+    public function addTask(array $data): int {}
+    
+    /**
+     * Get process status (internal call, from running process)
+     * 
+     * @return array Process status information:
+     *   - master: ['pid' => int, 'status' => string]
+     *   - worker: ['pid' => int, 'status' => string, 'uptime' => int]
+     *   - tasks: [['id' => int, 'pid' => int, 'status' => string], ...]
+     *   - current_process: string - 'master'|'worker'|'task-N'
+     *   - tasks_posted: int - Total tasks posted
+     *   - tasks_failed: int - Failed tasks count
+     * 
+     * @example
+     * ```php
+     * $status = $sip->getProcessStatus();
+     * 
+     * echo "Current process: {$status['current_process']}\n";
+     * echo "Master PID: {$status['master']['pid']}\n";
+     * echo "Worker PID: {$status['worker']['pid']}\n";
+     * echo "Tasks posted: {$status['tasks_posted']}\n";
+     * 
+     * foreach ($status['tasks'] as $task) {
+     *     echo "Task-{$task['id']}: PID {$task['pid']}, {$task['status']}\n";
+     * }
+     * ```
+     */
+    public function getProcessStatus(): array {}
+    
+    /**
+     * Get run status from PID file (external call, static method)
+     * 
+     * @param string $pidFile Path to PID file (e.g., '/tmp/gb28181_server.pid')
+     * @return array Process status information:
+     *   - master: ['pid' => int, 'status' => string, 'memory_rss_kb' => int, 'memory_vsz_kb' => int, 'fd_count' => int]
+     *   - worker: ['pid' => int, 'status' => string, 'memory_rss_kb' => int, 'memory_vsz_kb' => int, 'fd_count' => int, 'uptime' => int, 'restart_count' => int]
+     *   - tasks: [['id' => int, 'pid' => int, 'status' => string, 'memory_rss_kb' => int, 'memory_vsz_kb' => int, 'fd_count' => int], ...]
+     *   - error: string (if failed)
+     * 
+     * @example
+     * ```php
+     * // From external script (e.g., monitoring tool)
+     * $status = ExoSip::getRunStatus('/tmp/gb28181_server.pid');
+     * 
+     * if (isset($status['error'])) {
+     *     echo "Error: {$status['error']}\n";
+     *     exit(1);
+     * }
+     * 
+     * echo "Master PID: {$status['master']['pid']}\n";
+     * echo "Master Memory: " . round($status['master']['memory_rss_kb'] / 1024, 2) . " MB\n";
+     * echo "Worker PID: {$status['worker']['pid']}\n";
+     * echo "Worker Memory: " . round($status['worker']['memory_rss_kb'] / 1024, 2) . " MB\n";
+     * echo "Worker FD Count: {$status['worker']['fd_count']}\n";
+     * echo "Worker Uptime: {$status['worker']['uptime']} seconds\n";
+     * 
+     * foreach ($status['tasks'] as $task) {
+     *     $mem = round($task['memory_rss_kb'] / 1024, 2);
+     *     echo "Task-{$task['id']}: PID {$task['pid']}, Memory {$mem} MB\n";
+     * }
+     * ```
+     */
+    public static function getRunStatus(string $pidFile): array {}
 }
 
 /**

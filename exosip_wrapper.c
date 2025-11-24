@@ -5,6 +5,12 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <ctype.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <dirent.h>
+#include "ext/standard/php_var.h"
+#include "zend_smart_str.h"
 
 // 内存管理函数由osip库提供，不需要重新定义
 
@@ -55,6 +61,23 @@ SipContext* sip_init(ServerInfo *info) {
     ctx->timer_interval_ms = 0;
     ctx->last_timer_tick = 0;
     ctx->last_timer_tick_us = 0;
+    
+    // 初始化进程管理字段
+    ctx->master_pid = 0;
+    ctx->worker_pid = 0;
+    ctx->task_pids = NULL;
+    ctx->task_sockfds = NULL;
+    ctx->task_count = 0;
+    ctx->is_master = 0;
+    ctx->is_worker = 0;
+    ctx->is_task = 0;
+    ctx->task_worker_id = -1;
+    ctx->tasks_posted = 0;
+    ctx->tasks_failed = 0;
+    ctx->worker_start_time = 0;
+    ctx->worker_restart_count = 0;
+    ZVAL_UNDEF(&ctx->task_callback);
+    ZVAL_UNDEF(&ctx->task_finish_callback);
     
     int debug = info->debug;
     
@@ -2410,4 +2433,690 @@ int sip_check_and_fire_timer(SipContext *ctx) {
     
     return 0;
 }
+
+// ==================== Master-Worker-Task 进程管理 ====================
+
+static volatile sig_atomic_t g_shutdown_flag = 0;
+static volatile sig_atomic_t g_worker_died = 0;
+static SipContext *g_master_ctx = NULL;
+
+static void sigchld_handler(int signo) {
+    int status;
+    pid_t pid;
+    (void)signo;
+    
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (g_master_ctx && g_master_ctx->is_master) {
+            if (pid == g_master_ctx->worker_pid) {
+                fprintf(stderr, "[Master] Worker %d exited\n", pid);
+                g_worker_died = 1;
+            }
+        }
+    }
+}
+
+static void sigterm_handler(int signo) {
+    (void)signo;
+    g_shutdown_flag = 1;
+}
+
+int sip_start_master_process(SipContext *ctx) {
+    if (!ctx) return -1;
+    
+    ctx->master_pid = getpid();
+    ctx->is_master = 1;
+    ctx->is_worker = 0;
+    ctx->is_task = 0;
+    ctx->worker_restart_count = 0;
+    
+    g_master_ctx = ctx;
+    
+    signal(SIGCHLD, sigchld_handler);
+    signal(SIGTERM, sigterm_handler);
+    signal(SIGINT, sigterm_handler);
+    signal(SIGPIPE, SIG_IGN);
+    
+    fprintf(stderr, "[Master] Started PID=%d\n", ctx->master_pid);
+    
+    // Fork Worker 和 Task
+    if (sip_fork_worker(ctx) < 0) {
+        return -1;
+    }
+    
+    if (sip_fork_task_workers(ctx) < 0) {
+        return -1;
+    }
+    
+    // ✅ 只保存 Master PID（标准做法）
+    if (strlen(ctx->pid_file) > 0) {
+        FILE *fp = fopen(ctx->pid_file, "w");
+        if (fp) {
+            fprintf(fp, "%d\n", ctx->master_pid);
+            fclose(fp);
+            fprintf(stderr, "[Master] PID file saved: %s (PID=%d)\n", ctx->pid_file, ctx->master_pid);
+        } else {
+            fprintf(stderr, "[Master] Failed to write PID file: %s\n", ctx->pid_file);
+        }
+    }
+    
+    return 0;
+}
+
+int sip_fork_worker(SipContext *ctx) {
+    pid_t pid = fork();
+    
+    if (pid < 0) {
+        perror("[Master] fork worker failed");
+        return -1;
+    }
+    
+    if (pid == 0) {
+        // Worker child process
+        ctx->is_master = 0;
+        ctx->is_worker = 1;
+        ctx->is_task = 0;
+        ctx->worker_start_time = time(NULL);
+        
+        fprintf(stderr, "[Worker] Started PID=%d\n", getpid());
+        
+        // Worker will use PHP event loop in run(), so just return
+        // Do NOT call _exit() here
+        return 0;
+    }
+    
+    // Master process
+    ctx->worker_pid = pid;
+    return 0;
+}
+
+int sip_fork_task_workers(SipContext *ctx) {
+    if (ctx->task_count <= 0) ctx->task_count = 4;
+    
+    ctx->task_pids = (pid_t*)calloc(ctx->task_count, sizeof(pid_t));
+    ctx->task_sockfds = (int*)calloc(ctx->task_count, sizeof(int));
+    
+    if (!ctx->task_pids || !ctx->task_sockfds) {
+        return -1;
+    }
+    
+    for (int i = 0; i < ctx->task_count; i++) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == -1) {
+            perror("[Master] socketpair failed");
+            return -1;
+        }
+        
+        pid_t pid = fork();
+        
+        if (pid < 0) {
+            perror("[Master] fork task failed");
+            close(sv[0]);
+            close(sv[1]);
+            return -1;
+        }
+        
+        if (pid == 0) {
+            close(sv[0]);
+            ctx->is_master = 0;
+            ctx->is_worker = 0;
+            ctx->is_task = 1;
+            ctx->task_worker_id = i;
+            
+            fprintf(stderr, "[Task-%d] Started PID=%d\n", i, getpid());
+            sip_task_loop(ctx, sv[1]);
+            close(sv[1]);
+            _exit(0);
+        }
+        
+        close(sv[1]);
+        ctx->task_pids[i] = pid;
+        ctx->task_sockfds[i] = sv[0];
+        
+        int flags = fcntl(sv[0], F_GETFL, 0);
+        fcntl(sv[0], F_SETFL, flags | O_NONBLOCK);
+    }
+    
+    return 0;
+}
+
+void sip_master_loop(SipContext *ctx) {
+    fprintf(stderr, "[Master] Entering monitor loop\n");
+    
+    while (!g_shutdown_flag) {
+        if (g_worker_died) {
+            fprintf(stderr, "[Master] Restarting worker\n");
+            ctx->worker_restart_count++;
+            
+            if (sip_fork_worker(ctx) < 0) {
+                fprintf(stderr, "[Master] Failed to restart worker\n");
+                break;
+            }
+            
+            g_worker_died = 0;
+        }
+        
+        sleep(1);
+    }
+    
+    fprintf(stderr, "[Master] Shutting down\n");
+    
+    if (ctx->worker_pid > 0) {
+        kill(ctx->worker_pid, SIGTERM);
+    }
+    
+    for (int i = 0; i < ctx->task_count; i++) {
+        if (ctx->task_pids[i] > 0) {
+            kill(ctx->task_pids[i], SIGTERM);
+        }
+    }
+    
+    sleep(2);
+    
+    if (ctx->worker_pid > 0) kill(ctx->worker_pid, SIGKILL);
+    for (int i = 0; i < ctx->task_count; i++) {
+        if (ctx->task_pids[i] > 0) kill(ctx->task_pids[i], SIGKILL);
+    }
+    
+    // ✅ 删除 PID 文件
+    if (strlen(ctx->pid_file) > 0) {
+        if (unlink(ctx->pid_file) == 0) {
+            fprintf(stderr, "[Master] PID file deleted: %s\n", ctx->pid_file);
+        }
+    }
+    
+    fprintf(stderr, "[Master] Shutdown complete\n");
+}
+
+void sip_worker_loop(SipContext *ctx) {
+    signal(SIGTERM, sigterm_handler);
+    signal(SIGINT, sigterm_handler);
+    
+    ctx->running = 1;
+    
+    while (!g_shutdown_flag && ctx->running) {
+        eXosip_event_t *evt = eXosip_event_wait(ctx->ctx, 0, 100);
+        
+        if (evt) {
+            handle_sip_event(ctx, evt);
+            eXosip_event_free(evt);
+        }
+        
+        if (ctx->timer_interval_ms > 0) {
+            sip_check_and_fire_timer(ctx);
+        }
+        
+        for (int i = 0; i < ctx->task_count; i++) {
+            sip_handle_task_result(ctx, ctx->task_sockfds[i]);
+        }
+    }
+    
+    fprintf(stderr, "[Worker] Exiting\n");
+}
+
+void sip_task_loop(SipContext *ctx, int sockfd) {
+    signal(SIGTERM, sigterm_handler);
+    
+    while (!g_shutdown_flag) {
+        task_msg_t msg_hdr;
+        ssize_t n = read(sockfd, &msg_hdr, sizeof(msg_hdr));
+        
+        if (n == sizeof(msg_hdr)) {
+            char *data = NULL;
+            if (msg_hdr.data_len > 0) {
+                data = (char*)malloc(msg_hdr.data_len);
+                if (data && read(sockfd, data, msg_hdr.data_len) == (ssize_t)msg_hdr.data_len) {
+                    // 反序列化 PHP array
+                    zval task_data;
+                    php_unserialize_data_t var_hash;
+                    PHP_VAR_UNSERIALIZE_INIT(var_hash);
+                    
+                    const unsigned char *p = (const unsigned char *)data;
+                    if (php_var_unserialize(&task_data, &p, p + msg_hdr.data_len, &var_hash)) {
+                        // 调用 PHP onTask 回调
+                        if (Z_TYPE(ctx->task_callback) == IS_OBJECT) {
+                            zval retval;
+                            zval args[2];
+                            ZVAL_LONG(&args[0], msg_hdr.task_id);
+                            ZVAL_COPY(&args[1], &task_data);
+                            
+                            if (call_user_function(NULL, &ctx->task_callback, &ctx->task_callback, &retval, 2, args) == SUCCESS) {
+                                // 序列化返回结果
+                                smart_str buf = {0};
+                                php_serialize_data_t serialize_data;
+                                PHP_VAR_SERIALIZE_INIT(serialize_data);
+                                php_var_serialize(&buf, &retval, &serialize_data);
+                                smart_str_0(&buf);
+                                PHP_VAR_SERIALIZE_DESTROY(serialize_data);
+                                
+                                // 发送结果回 Worker
+                                task_result_t result_hdr;
+                                result_hdr.task_id = msg_hdr.task_id;
+                                result_hdr.success = 1;
+                                result_hdr.result_len = ZSTR_LEN(buf.s);
+                                
+                                write(sockfd, &result_hdr, sizeof(result_hdr));
+                                if (result_hdr.result_len > 0) {
+                                    write(sockfd, ZSTR_VAL(buf.s), result_hdr.result_len);
+                                }
+                                
+                                smart_str_free(&buf);
+                                zval_ptr_dtor(&retval);
+                            }
+                            
+                            zval_ptr_dtor(&args[0]);
+                            zval_ptr_dtor(&args[1]);
+                        }
+                        
+                        zval_ptr_dtor(&task_data);
+                    }
+                    
+                    PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+                    free(data);
+                } else {
+                    free(data);
+                }
+            }
+        } else if (n == 0) {
+            break;
+        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            break;
+        }
+        
+        usleep(10000);
+    }
+    
+    fprintf(stderr, "[Task-%d] Exiting\n", ctx->task_worker_id);
+}
+
+unsigned long sip_add_task(SipContext *ctx, const char *serialized_data, size_t data_len) {
+    if (!ctx || !ctx->is_worker || !serialized_data) {
+        return 0;
+    }
+    
+    unsigned long task_id = ++ctx->tasks_posted;
+    
+    int target_fd = ctx->task_sockfds[task_id % ctx->task_count];
+    
+    task_msg_t msg_hdr;
+    msg_hdr.task_id = task_id;
+    msg_hdr.data_len = data_len;
+    
+    pthread_mutex_lock(&ctx->lock);
+    
+    ssize_t n = write(target_fd, &msg_hdr, sizeof(msg_hdr));
+    if (n == sizeof(msg_hdr) && data_len > 0) {
+        n = write(target_fd, serialized_data, data_len);
+    }
+    
+    pthread_mutex_unlock(&ctx->lock);
+    
+    if (n < 0) {
+        ctx->tasks_failed++;
+        return 0;
+    }
+    
+    return task_id;
+}
+
+void sip_handle_task_result(SipContext *ctx, int sockfd) {
+    task_result_t result_hdr;
+    ssize_t n = read(sockfd, &result_hdr, sizeof(result_hdr));
+    
+    if (n == sizeof(result_hdr)) {
+        char *result_data = NULL;
+        if (result_hdr.result_len > 0) {
+            result_data = (char*)malloc(result_hdr.result_len);
+            if (result_data && read(sockfd, result_data, result_hdr.result_len) == (ssize_t)result_hdr.result_len) {
+                // 反序列化 PHP 返回值
+                zval result_zval;
+                php_unserialize_data_t var_hash;
+                PHP_VAR_UNSERIALIZE_INIT(var_hash);
+                
+                const unsigned char *p = (const unsigned char *)result_data;
+                if (php_var_unserialize(&result_zval, &p, p + result_hdr.result_len, &var_hash)) {
+                    // 调用 PHP onTaskFinish 回调
+                    if (Z_TYPE(ctx->task_finish_callback) == IS_OBJECT) {
+                        zval retval;
+                        zval args[2];
+                        ZVAL_LONG(&args[0], result_hdr.task_id);
+                        ZVAL_COPY(&args[1], &result_zval);
+                        
+                        call_user_function(NULL, &ctx->task_finish_callback, &ctx->task_finish_callback, &retval, 2, args);
+                        
+                        zval_ptr_dtor(&retval);
+                        zval_ptr_dtor(&args[0]);
+                        zval_ptr_dtor(&args[1]);
+                    }
+                    
+                    zval_ptr_dtor(&result_zval);
+                }
+                
+                PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+                free(result_data);
+            } else {
+                free(result_data);
+            }
+        }
+    }
+}
+
+// ==================== 进程状态查询 ====================
+
+/**
+ * 获取进程状态信息
+ * @param ctx SIP上下文
+ * @param status_array PHP数组，用于存储进程状态
+ * 
+ * 返回格式：
+ * [
+ *   'master' => ['pid' => 12345, 'status' => 'running'],
+ *   'worker' => ['pid' => 12346, 'status' => 'running', 'uptime' => 120, 'restart_count' => 0],
+ *   'tasks' => [
+ *     ['id' => 0, 'pid' => 12347, 'status' => 'running'],
+ *     ['id' => 1, 'pid' => 12348, 'status' => 'running'],
+ *     ...
+ *   ]
+ * ]
+ */
+void sip_get_process_status(SipContext *ctx, zval *status_array) {
+    if (!ctx || !status_array) {
+        return;
+    }
+    
+    array_init(status_array);
+    
+    // Master 进程信息
+    if (ctx->master_pid > 0) {
+        zval master_info;
+        array_init(&master_info);
+        add_assoc_long(&master_info, "pid", ctx->master_pid);
+        
+        // 检查进程是否存在
+        int master_alive = (kill(ctx->master_pid, 0) == 0);
+        add_assoc_string(&master_info, "status", master_alive ? "running" : "dead");
+        
+        if (ctx->is_master) {
+            add_assoc_bool(&master_info, "current", 1);
+        }
+        
+        add_assoc_zval(status_array, "master", &master_info);
+    }
+    
+    // Worker 进程信息
+    if (ctx->worker_pid > 0) {
+        zval worker_info;
+        array_init(&worker_info);
+        add_assoc_long(&worker_info, "pid", ctx->worker_pid);
+        
+        // 检查进程是否存在
+        int worker_alive = (kill(ctx->worker_pid, 0) == 0);
+        add_assoc_string(&worker_info, "status", worker_alive ? "running" : "dead");
+        
+        // 运行时长
+        if (ctx->worker_start_time > 0) {
+            time_t uptime = time(NULL) - ctx->worker_start_time;
+            add_assoc_long(&worker_info, "uptime", uptime);
+        }
+        
+        // 重启次数
+        add_assoc_long(&worker_info, "restart_count", ctx->worker_restart_count);
+        
+        if (ctx->is_worker) {
+            add_assoc_bool(&worker_info, "current", 1);
+        }
+        
+        add_assoc_zval(status_array, "worker", &worker_info);
+    }
+    
+    // Task 进程池信息
+    if (ctx->task_count > 0 && ctx->task_pids) {
+        zval tasks_array;
+        array_init(&tasks_array);
+        
+        for (int i = 0; i < ctx->task_count; i++) {
+            zval task_info;
+            array_init(&task_info);
+            
+            add_assoc_long(&task_info, "id", i);
+            add_assoc_long(&task_info, "pid", ctx->task_pids[i]);
+            
+            // 检查进程是否存在
+            int task_alive = (kill(ctx->task_pids[i], 0) == 0);
+            add_assoc_string(&task_info, "status", task_alive ? "running" : "dead");
+            
+            if (ctx->is_task && ctx->task_worker_id == i) {
+                add_assoc_bool(&task_info, "current", 1);
+            }
+            
+            add_next_index_zval(&tasks_array, &task_info);
+        }
+        
+        add_assoc_zval(status_array, "tasks", &tasks_array);
+    }
+    
+    // 进程类型标识
+    if (ctx->is_master) {
+        add_assoc_string(status_array, "current_process", "master");
+    } else if (ctx->is_worker) {
+        add_assoc_string(status_array, "current_process", "worker");
+    } else if (ctx->is_task) {
+        add_assoc_string(status_array, "current_process", "task");
+        add_assoc_long(status_array, "current_task_id", ctx->task_worker_id);
+    } else {
+        add_assoc_string(status_array, "current_process", "single");
+    }
+    
+    // 任务统计
+    if (ctx->is_worker) {
+        add_assoc_long(status_array, "tasks_posted", ctx->tasks_posted);
+        add_assoc_long(status_array, "tasks_failed", ctx->tasks_failed);
+    }
+}
+
+/**
+ * 从 PID 文件读取进程状态（外部脚本调用）
+ * @param pid_file PID 文件路径
+ * @param status_array PHP 数组，用于存储进程状态
+ * @return 0=成功, -1=失败
+ * 
+ * PID 文件格式：
+ * Line 1: master_pid
+ * Line 2: worker_pid
+ * Line 3: task_count
+ * Line 4+: task_pids[0..N-1]
+ */
+int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
+    if (!pid_file || !status_array) {
+        return -1;
+    }
+    
+    FILE *fp = fopen(pid_file, "r");
+    if (!fp) {
+        return -1;
+    }
+    
+    array_init(status_array);
+    
+    pid_t master_pid = 0;
+    char cmd[512];  // 声明 cmd 缓冲区
+    
+    // 只读取 Master PID
+    if (fscanf(fp, "%d", &master_pid) != 1) {
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    
+    // 检查 Master 进程是否存在
+    if (kill(master_pid, 0) != 0) {
+        add_assoc_long(status_array, "master_pid", master_pid);
+        add_assoc_string(status_array, "status", "stopped");
+        add_assoc_string(status_array, "message", "Master process not running");
+        return 0;
+    }
+    
+    // Master 进程信息
+    zval master_info;
+    array_init(&master_info);
+    add_assoc_long(&master_info, "pid", master_pid);
+    add_assoc_string(&master_info, "status", "running");
+    
+    // 获取 Master 进程内存和 FD 信息
+#ifdef __APPLE__
+    snprintf(cmd, sizeof(cmd), "ps -o rss=,vsz= -p %d", master_pid);
+    FILE *ps_mem = popen(cmd, "r");
+    if (ps_mem) {
+        long rss_kb = 0, vsz_kb = 0;
+        if (fscanf(ps_mem, "%ld %ld", &rss_kb, &vsz_kb) == 2) {
+            add_assoc_long(&master_info, "memory_rss_kb", rss_kb);  // 物理内存
+            add_assoc_long(&master_info, "memory_vsz_kb", vsz_kb);  // 虚拟内存
+        }
+        pclose(ps_mem);
+    }
+    
+    // 获取文件描述符数量
+    snprintf(cmd, sizeof(cmd), "lsof -p %d 2>/dev/null | wc -l", master_pid);
+    FILE *lsof_cmd = popen(cmd, "r");
+    if (lsof_cmd) {
+        int fd_count = 0;
+        if (fscanf(lsof_cmd, "%d", &fd_count) == 1) {
+            // lsof 输出包含标题行，减 1
+            add_assoc_long(&master_info, "fd_count", fd_count > 0 ? fd_count - 1 : 0);
+        }
+        pclose(lsof_cmd);
+    }
+#else
+    // Linux: 从 /proc 读取
+    snprintf(cmd, sizeof(cmd), "/proc/%d/status", master_pid);
+    FILE *status_file = fopen(cmd, "r");
+    if (status_file) {
+        char line[256];
+        while (fgets(line, sizeof(line), status_file)) {
+            if (strncmp(line, "VmRSS:", 6) == 0) {
+                long rss_kb;
+                if (sscanf(line + 6, "%ld", &rss_kb) == 1) {
+                    add_assoc_long(&master_info, "memory_rss_kb", rss_kb);
+                }
+            } else if (strncmp(line, "VmSize:", 7) == 0) {
+                long vsz_kb;
+                if (sscanf(line + 7, "%ld", &vsz_kb) == 1) {
+                    add_assoc_long(&master_info, "memory_vsz_kb", vsz_kb);
+                }
+            }
+        }
+        fclose(status_file);
+    }
+    
+    // 统计 FD 数量
+    snprintf(cmd, sizeof(cmd), "/proc/%d/fd", master_pid);
+    DIR *fd_dir = opendir(cmd);
+    if (fd_dir) {
+        int fd_count = 0;
+        struct dirent *entry;
+        while ((entry = readdir(fd_dir)) != NULL) {
+            if (entry->d_name[0] != '.') {
+                fd_count++;
+            }
+        }
+        closedir(fd_dir);
+        add_assoc_long(&master_info, "fd_count", fd_count);
+    }
+#endif
+    
+    add_assoc_zval(status_array, "master", &master_info);
+    
+    // 查找子进程（通过 ps 命令）
+    
+#ifdef __APPLE__
+    // macOS: ps -o pid,ppid,command -p <master_pid> 然后查找子进程
+    snprintf(cmd, sizeof(cmd), "ps -o pid=,ppid= -A | awk '$2 == %d {print $1}'", master_pid);
+#else
+    // Linux: ps --ppid <master_pid>
+    snprintf(cmd, sizeof(cmd), "ps --ppid %d -o pid=", master_pid);
+#endif
+    
+    FILE *ps = popen(cmd, "r");
+    if (ps) {
+        pid_t child_pids[32];
+        int child_count = 0;
+        
+        while (child_count < 32 && fscanf(ps, "%d", &child_pids[child_count]) == 1) {
+            child_count++;
+        }
+        pclose(ps);
+        
+        // 第一个子进程通常是 Worker
+        if (child_count > 0) {
+            zval worker_info;
+            array_init(&worker_info);
+            add_assoc_long(&worker_info, "pid", child_pids[0]);
+            add_assoc_string(&worker_info, "status", "running");
+            
+            // 获取 Worker 进程内存和 FD
+#ifdef __APPLE__
+            snprintf(cmd, sizeof(cmd), "ps -o rss=,vsz= -p %d", child_pids[0]);
+            FILE *ps_worker = popen(cmd, "r");
+            if (ps_worker) {
+                long rss_kb = 0, vsz_kb = 0;
+                if (fscanf(ps_worker, "%ld %ld", &rss_kb, &vsz_kb) == 2) {
+                    add_assoc_long(&worker_info, "memory_rss_kb", rss_kb);
+                    add_assoc_long(&worker_info, "memory_vsz_kb", vsz_kb);
+                }
+                pclose(ps_worker);
+            }
+            
+            snprintf(cmd, sizeof(cmd), "lsof -p %d 2>/dev/null | wc -l", child_pids[0]);
+            FILE *lsof_worker = popen(cmd, "r");
+            if (lsof_worker) {
+                int fd_count = 0;
+                if (fscanf(lsof_worker, "%d", &fd_count) == 1) {
+                    add_assoc_long(&worker_info, "fd_count", fd_count > 0 ? fd_count - 1 : 0);
+                }
+                pclose(lsof_worker);
+            }
+#endif
+            
+            add_assoc_zval(status_array, "worker", &worker_info);
+        }
+        
+        // 其余子进程是 Task
+        if (child_count > 1) {
+            zval tasks_array;
+            array_init(&tasks_array);
+            
+            for (int i = 1; i < child_count; i++) {
+                zval task_info;
+                array_init(&task_info);
+                add_assoc_long(&task_info, "id", i - 1);
+                add_assoc_long(&task_info, "pid", child_pids[i]);
+                add_assoc_string(&task_info, "status", "running");
+                
+                // 获取 Task 进程内存
+#ifdef __APPLE__
+                snprintf(cmd, sizeof(cmd), "ps -o rss= -p %d", child_pids[i]);
+                FILE *ps_task = popen(cmd, "r");
+                if (ps_task) {
+                    long rss_kb = 0;
+                    if (fscanf(ps_task, "%ld", &rss_kb) == 1) {
+                        add_assoc_long(&task_info, "memory_rss_kb", rss_kb);
+                    }
+                    pclose(ps_task);
+                }
+#endif
+                
+                add_next_index_zval(&tasks_array, &task_info);
+            }
+            
+            add_assoc_zval(status_array, "tasks", &tasks_array);
+        }
+        
+        add_assoc_long(status_array, "total_processes", child_count + 1);
+    }
+    
+    add_assoc_string(status_array, "pid_file", (char*)pid_file);
+    
+    return 0;
+}
+
+
 

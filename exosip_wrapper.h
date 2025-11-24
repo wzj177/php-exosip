@@ -230,12 +230,51 @@ typedef struct _sip_context {
     time_t last_timer_tick;     // 上次触发时间（秒）
     long last_timer_tick_us;    // 上次触发时间（微秒）
     
+    // Master-Worker-Task 进程管理
+    pid_t master_pid;
+    pid_t worker_pid;
+    pid_t *task_pids;
+    int task_count;
+    int *task_sockfds;
+    char pid_file[256];         // PID 文件路径
+    
+    // 进程状态标识
+    int is_master;
+    int is_worker;
+    int is_task;
+    int task_worker_id;
+    
+    // 任务统计
+    unsigned long tasks_posted;
+    unsigned long tasks_failed;
+    time_t worker_start_time;
+    int worker_restart_count;
+    
+    // Task 回调
+    zval task_callback;
+    zval task_finish_callback;
+    
     // 原始数据缓存（可选）
     int save_raw_data;
     RawData *raw_data_buffer;
     int raw_data_size;
     
 } SipContext;
+
+// 任务消息结构（socketpair传递）
+typedef struct {
+    unsigned long task_id;
+    size_t data_len;
+    char data[0];
+} task_msg_t;
+
+// 任务结果结构
+typedef struct {
+    unsigned long task_id;
+    int success;
+    size_t result_len;
+    char result[0];
+} task_result_t;
 
 // 客户端配置信息
 typedef struct _client_config {
@@ -380,6 +419,20 @@ void exosip_set_callbacks_wrapper(SipContext *ctx, zval *event_cb, zval *conn_cb
 int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeout_ms);
 int exosip_get_socket_fd(SipContext *ctx);
 int exosip_send_message_wrapper(SipContext *ctx, const char *to, const char *message);
+
+// ==================== Master-Worker-Task API ====================
+int sip_start_master_process(SipContext *ctx);
+void sip_master_loop(SipContext *ctx);
+int sip_fork_worker(SipContext *ctx);
+int sip_fork_task_workers(SipContext *ctx);
+void sip_worker_loop(SipContext *ctx);
+void sip_task_loop(SipContext *ctx, int worker_id);
+unsigned long sip_add_task(SipContext *ctx, const char *serialized_data, size_t data_len);
+void sip_handle_task_result(SipContext *ctx, int sockfd);
+void sip_get_process_status(SipContext *ctx, zval *status_array);
+int sip_read_process_status_from_pid(const char *pid_file, zval *status_array);
+
+// ==================== 发送API ====================
 int exosip_send_message_with_content_type(SipContext *ctx, const char *to, const char *message, const char *content_type);
 int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *headers);
 zval* exosip_create_event_object(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session);

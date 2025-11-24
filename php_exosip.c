@@ -4,6 +4,8 @@
 #include "php_exosip.h"
 #include "exosip_wrapper.h"
 #include "zend_exceptions.h"
+#include "ext/standard/php_var.h"
+#include "zend_smart_str.h"
 #include <signal.h>
 #include <eXosip2/eXosip.h>
 
@@ -71,6 +73,17 @@ ZEND_END_ARG_INFO()
 
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getstats, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_addtask, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, data, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getprocessstatus, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getrunstatus, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, pid_file, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
 /* SipEvent class arginfo */
@@ -519,6 +532,10 @@ typedef struct _php_exosip_obj {
     /* Timer Support (Single-threaded Event Loop) */
     zval onTimer;        // 定时器回调
     
+    /* Master-Worker-Task Support */
+    zval onTask;         // Task 进程回调
+    zval onTaskFinish;   // Task 完成回调（Worker 进程）
+    
     /* Universal SIP Configuration */
     HashTable *config;   // 服务器配置参数
     
@@ -627,6 +644,11 @@ static void php_exosip_free_obj(zend_object *object) {
         /* Connection management */
         SAFE_ZVAL_DTOR(obj->onConnect);
         SAFE_ZVAL_DTOR(obj->onClose);
+        SAFE_ZVAL_DTOR(obj->onTimer);
+        
+        /* Master-Worker-Task */
+        SAFE_ZVAL_DTOR(obj->onTask);
+        SAFE_ZVAL_DTOR(obj->onTaskFinish);
         
         #undef SAFE_ZVAL_DTOR
     }
@@ -680,6 +702,10 @@ static zval *exosip_read_property(zend_object *object, zend_string *member, int 
     /* Timer support */
     if (strcmp(prop_name, "onTimer") == 0) return &obj->onTimer;
     
+    /* Master-Worker-Task */
+    if (strcmp(prop_name, "onTask") == 0) return &obj->onTask;
+    if (strcmp(prop_name, "onTaskFinish") == 0) return &obj->onTaskFinish;
+    
     return zend_std_read_property(object, member, type, cache_slot, rv);
 }
 
@@ -719,13 +745,17 @@ static zval *exosip_write_property(zend_object *object, zend_string *member, zva
         ZVAL_COPY(&obj->onTimer, value); 
         // 设置到 C 层定时器
         if (obj->ctx) {
-            // 从 config 中获取 timerInterval，默认 1000ms
-            zval *interval_val = zend_hash_str_find(obj->config, "timerInterval", 13);
+            // 从 config 中获取 timer_interval，默认 1000ms
+            zval *interval_val = zend_hash_str_find(obj->config, "timer_interval", 14);
             int interval_ms = (interval_val && Z_TYPE_P(interval_val) == IS_LONG) ? Z_LVAL_P(interval_val) : 1000;
             sip_set_timer_callback(obj->ctx, value, interval_ms);
         }
         return &obj->onTimer; 
     }
+    
+    /* Master-Worker-Task */
+    if (strcmp(prop_name, "onTask") == 0) { ZVAL_COPY(&obj->onTask, value); return &obj->onTask; }
+    if (strcmp(prop_name, "onTaskFinish") == 0) { ZVAL_COPY(&obj->onTaskFinish, value); return &obj->onTaskFinish; }
     
     return zend_std_write_property(object, member, value, cache_slot);
 }
@@ -762,6 +792,8 @@ static zend_object *php_exosip_create_object(zend_class_entry *ce) {
     ZVAL_UNDEF(&obj->onConnect);
     ZVAL_UNDEF(&obj->onClose);
     ZVAL_UNDEF(&obj->onTimer);  // 定时器回调
+    ZVAL_UNDEF(&obj->onTask);
+    ZVAL_UNDEF(&obj->onTaskFinish);
     
     return &obj->std;
 }
@@ -825,12 +857,40 @@ PHP_METHOD(ExoSip, __construct) {
         val = zend_hash_str_find(Z_ARRVAL_P(configArr), "debug", 5);
         info.debug = (val && (Z_TYPE_P(val) == IS_TRUE || (Z_TYPE_P(val) == IS_LONG && Z_LVAL_P(val)))) ? 1 : 0;
 
-        // 尝试初始化，捕获可能的错误
-        obj->ctx = exosip_init_wrapper(&info);
-        if (!obj->ctx) {
-            php_error_docref(NULL, E_WARNING, "Failed to init eXosip in constructor - port %d may be in use", info.port);
-            // 注意：不要抛出异常，让对象创建成功但ctx为NULL
-            // 用户可以稍后调用init()重试
+        // Read task_worker_num config (before init)
+        val = zend_hash_str_find(Z_ARRVAL_P(configArr), "task_worker_num", 15);
+        int task_worker_num = (val && Z_TYPE_P(val) == IS_LONG) ? Z_LVAL_P(val) : 0;
+        
+        // ✅ 如果是多进程模式，延迟初始化（在 Worker 进程中初始化）
+        if (task_worker_num > 0) {
+            // 只创建空的 SipContext，不绑定端口
+            obj->ctx = (SipContext*)calloc(1, sizeof(SipContext));
+            if (!obj->ctx) {
+                php_error_docref(NULL, E_ERROR, "Failed to allocate SipContext");
+                return;
+            }
+            
+            // 保存配置，稍后在 Worker 中初始化
+            obj->ctx->server_info = info;
+            obj->ctx->task_count = task_worker_num;
+            obj->ctx->running = 0; // 标记未初始化
+            
+            // 读取 pid_file 配置
+            val = zend_hash_str_find(Z_ARRVAL_P(configArr), "pid_file", 8);
+            if (val && Z_TYPE_P(val) == IS_STRING) {
+                strncpy(obj->ctx->pid_file, Z_STRVAL_P(val), sizeof(obj->ctx->pid_file) - 1);
+            } else {
+                snprintf(obj->ctx->pid_file, sizeof(obj->ctx->pid_file), "/tmp/php_exosip_%d.pid", info.port);
+            }
+            
+            php_printf("[INFO] Multi-process mode enabled, eXosip will be initialized in Worker process\n");
+            php_printf("[INFO] PID file: %s\n", obj->ctx->pid_file);
+        } else {
+            // 单进程模式：立即初始化
+            obj->ctx = exosip_init_wrapper(&info);
+            if (!obj->ctx) {
+                php_error_docref(NULL, E_WARNING, "Failed to init eXosip in constructor - port %d may be in use", info.port);
+            }
         }
     }
 }
@@ -1057,7 +1117,181 @@ PHP_METHOD(ExoSip, run) {
         RETURN_FALSE;
     }
 
-    // 启动通用SIP服务器事件循环
+    // Check if Master-Worker-Task mode is enabled
+    if (obj->ctx->task_count > 0) {
+        // 绑定 Task 回调到 SipContext（在 fork 前）
+        if (!Z_ISUNDEF(obj->onTask)) {
+            ZVAL_COPY(&obj->ctx->task_callback, &obj->onTask);
+        }
+        if (!Z_ISUNDEF(obj->onTaskFinish)) {
+            ZVAL_COPY(&obj->ctx->task_finish_callback, &obj->onTaskFinish);
+        }
+        
+        if (sip_start_master_process(obj->ctx) < 0) {
+            php_error_docref(NULL, E_WARNING, "Failed to start Master process");
+            RETURN_FALSE;
+        }
+        
+        if (obj->ctx->is_master) {
+            php_printf("[Master] SIP Server started with %d Task workers\n", obj->ctx->task_count);
+            sip_master_loop(obj->ctx);
+            RETURN_TRUE;
+        }
+        
+        // Task processes: they are already in sip_task_loop()
+        if (obj->ctx->is_task) {
+            // This code path should not be reached as Task processes call _exit() in sip_task_loop
+            RETURN_TRUE;
+        }
+        
+        // Worker process: initialize eXosip and use dedicated event loop
+        if (obj->ctx->is_worker) {
+            php_printf("[Worker] Initializing eXosip and entering SIP event loop (PID=%d)\n", getpid());
+            
+            // ✅ Worker 进程：初始化 eXosip（绑定端口）
+            struct eXosip_t *exosip_ctx = eXosip_malloc();
+            if (!exosip_ctx) {
+                php_error_docref(NULL, E_ERROR, "[Worker] eXosip_malloc() failed");
+                RETURN_FALSE;
+            }
+            
+            if (eXosip_init(exosip_ctx) != 0) {
+                php_error_docref(NULL, E_ERROR, "[Worker] eXosip_init() failed");
+                RETURN_FALSE;
+            }
+            
+            // 设置 User-Agent
+            eXosip_set_user_agent(exosip_ctx, obj->ctx->server_info.ua);
+            
+            // 监听端口
+            const char *mode = obj->ctx->server_info.mode;
+            int transport = IPPROTO_UDP;
+            if (strcmp(mode, "tcp") == 0) transport = IPPROTO_TCP;
+            else if (strcmp(mode, "tls") == 0) transport = IPPROTO_TCP; // TLS 需要额外配置
+            
+            int ret = eXosip_listen_addr(exosip_ctx, transport, 
+                                          obj->ctx->server_info.ip, 
+                                          obj->ctx->server_info.port, 
+                                          AF_INET, 0);
+            if (ret != 0) {
+                php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d",
+                    obj->ctx->server_info.ip, obj->ctx->server_info.port);
+                RETURN_FALSE;
+            }
+            
+            obj->ctx->ctx = exosip_ctx;
+            obj->ctx->running = 1;
+            
+            php_printf("[Worker] eXosip listening on %s:%d (%s)\n",
+                obj->ctx->server_info.ip, obj->ctx->server_info.port, mode);
+            
+            // Save original signal handlers
+            struct sigaction old_sigint, old_sigterm;
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = php_exosip_signal_handler;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            
+            sigaction(SIGINT, &sa, &old_sigint);
+            sigaction(SIGTERM, &sa, &old_sigterm);
+            
+            // Worker process: process SIP events
+            obj->ctx->running = 1;
+            obj->is_running = 1;
+            
+            php_exosip_register_instance(obj);
+            
+            while (obj->ctx->running && obj->is_running) {
+                // Get SIP events (non-blocking, 100ms timeout)
+                zval events_array;
+                int event_count = exosip_get_events_nonblocking(obj->ctx, &events_array, 100);
+                
+                if (event_count < 0) {
+                    php_error_docref(NULL, E_WARNING, "[Worker] Failed to get SIP events");
+                    break;
+                }
+                
+                if (event_count > 0) {
+                    HashTable *events_ht = Z_ARRVAL(events_array);
+                    zval *event_data;
+                    
+                    ZEND_HASH_FOREACH_VAL(events_ht, event_data) {
+                        zval sip_event_obj;
+                        object_init_ex(&sip_event_obj, sip_event_ce);
+                        php_sip_event_obj *event_obj = php_sip_event_from_obj(Z_OBJ(sip_event_obj));
+                        
+                        if (!php_exosip_parse_event_data(event_obj, event_data)) {
+                            zval_ptr_dtor(&sip_event_obj);
+                            continue;
+                        }
+                        
+                        zval *method_val = zend_hash_str_find(Z_ARRVAL_P(event_data), "method", 6);
+                        osip_message_t *dummy_request = NULL;
+                        const char* event_type = php_exosip_get_event_type_name(event_obj->event_type, dummy_request);
+                        
+                        if (event_obj->event_type == EXOSIP_MESSAGE_NEW && method_val && Z_TYPE_P(method_val) == IS_STRING) {
+                            const char *method = Z_STRVAL_P(method_val);
+                            if (strcmp(method, "REGISTER") == 0) {
+                                event_type = "register";
+                            } else if (strcmp(method, "MESSAGE") == 0) {
+                                event_type = "message";
+                            }
+                        }
+                        
+                        zval *callback = php_exosip_get_event_callback(obj, event_type);
+                        
+                        if (callback) {
+                            Z_TRY_ADDREF(sip_event_obj);
+                            zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
+                            
+                            if (Z_TYPE(result) == IS_FALSE) {
+                                php_printf("[Worker] Server shutdown requested\n");
+                                obj->is_running = 0;
+                                obj->ctx->running = 0;
+                            }
+                            zval_ptr_dtor(&result);
+                        }
+                        
+                        zval_ptr_dtor(&sip_event_obj);
+                    } ZEND_HASH_FOREACH_END();
+                    
+                    zval_ptr_dtor(&events_array);
+                }
+                
+                // Check timer (with exception protection)
+                if (obj->ctx->timer_interval_ms > 0 && sip_check_and_fire_timer(obj->ctx)) {
+                    if (Z_TYPE(obj->onTimer) == IS_OBJECT) {
+                        zval result;
+                        zval args[0];
+                        
+                        zend_try {
+                            if (call_user_function(NULL, &obj->onTimer, &obj->onTimer, &result, 0, args) == SUCCESS) {
+                                if (Z_TYPE(result) == IS_FALSE) {
+                                    obj->is_running = 0;
+                                    obj->ctx->running = 0;
+                                }
+                                zval_ptr_dtor(&result);
+                            }
+                        } zend_catch {
+                            php_error_docref(NULL, E_WARNING, "[Worker] onTimer callback threw an exception");
+                            // 继续运行，不崩溃
+                        } zend_end_try();
+                    }
+                }
+                
+                // Check Task results
+                for (int i = 0; i < obj->ctx->task_count; i++) {
+                    sip_handle_task_result(obj->ctx, obj->ctx->task_sockfds[i]);
+                }
+            }
+            
+            php_printf("[Worker] Exiting event loop\n");
+            RETURN_TRUE;
+        }
+    }
+
+    // Single-process mode: 启动通用SIP服务器事件循环
     obj->ctx->running = 1;
     obj->is_running = 1;
     
@@ -1709,6 +1943,67 @@ PHP_METHOD(ExoSip, getStats) {
     add_assoc_zval(return_value, "event_handlers", &handlers);
 }
 
+PHP_METHOD(ExoSip, addTask) {
+    zval *data;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY(data)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    
+    if (!obj->ctx || !obj->ctx->is_worker) {
+        php_error_docref(NULL, E_WARNING, "addTask can only be called in Worker process");
+        RETURN_FALSE;
+    }
+    
+    smart_str buf = {0};
+    php_serialize_data_t var_hash;
+    PHP_VAR_SERIALIZE_INIT(var_hash);
+    php_var_serialize(&buf, data, &var_hash);
+    PHP_VAR_SERIALIZE_DESTROY(var_hash);
+    
+    if (!buf.s) {
+        RETURN_FALSE;
+    }
+    
+    unsigned long task_id = sip_add_task(obj->ctx, ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+    smart_str_free(&buf);
+    
+    if (task_id == 0) {
+        RETURN_FALSE;
+    }
+    
+    RETURN_LONG(task_id);
+}
+
+/* ========== ExoSip::getProcessStatus() ========== */
+PHP_METHOD(ExoSip, getProcessStatus) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    
+    if (!obj->ctx) {
+        RETURN_FALSE;
+    }
+    
+    sip_get_process_status(obj->ctx, return_value);
+}
+
+/* ========== ExoSip::getRunStatus() 静态方法 ========== */
+PHP_METHOD(ExoSip, getRunStatus) {
+    char *pid_file;
+    size_t pid_file_len;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(pid_file, pid_file_len)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    if (sip_read_process_status_from_pid(pid_file, return_value) < 0) {
+        RETURN_FALSE;
+    }
+}
+
 /* 全局函数已移除 - 统一使用 ExoSip 类的 OOP API */
 
 /* ===== ExoSip Class methods ===== */
@@ -1735,6 +2030,11 @@ const zend_function_entry exosip_methods[] = {
     PHP_ME(ExoSip, setConfig, arginfo_exosip_setconfig, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getConfig, arginfo_exosip_getconfig, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getStats, arginfo_exosip_getstats, ZEND_ACC_PUBLIC)
+    
+    /* Master-Worker-Task */
+    PHP_ME(ExoSip, addTask, arginfo_exosip_addtask, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, getProcessStatus, arginfo_exosip_getprocessstatus, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, getRunStatus, arginfo_exosip_getrunstatus, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     
     PHP_FE_END
 };
