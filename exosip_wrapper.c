@@ -2845,6 +2845,11 @@ void sip_worker_loop(SipContext *ctx) {
 void sip_task_loop(SipContext *ctx, int sockfd) {
     signal(SIGTERM, sigterm_handler);
     
+    // 调试:检查回调是否设置
+    fprintf(stderr, "[Task-%d] Starting, callback status: task_callback=%s\n", 
+           ctx->task_worker_id, 
+           Z_ISUNDEF(ctx->task_callback) ? "NOT SET" : "SET");
+    
     while (!g_shutdown_flag) {
         task_msg_t msg_hdr;
         ssize_t n = read(sockfd, &msg_hdr, sizeof(msg_hdr));
@@ -2862,38 +2867,54 @@ void sip_task_loop(SipContext *ctx, int sockfd) {
                     const unsigned char *p = (const unsigned char *)data;
                     if (php_var_unserialize(&task_data, &p, p + msg_hdr.data_len, &var_hash)) {
                         // 调用 PHP onTask 回调
-                        if (Z_TYPE(ctx->task_callback) == IS_OBJECT) {
+                        if (!Z_ISUNDEF(ctx->task_callback) && zend_is_callable(&ctx->task_callback, 0, NULL)) {
                             zval retval;
-                            zval args[2];
-                            ZVAL_LONG(&args[0], msg_hdr.task_id);
-                            ZVAL_COPY(&args[1], &task_data);
+                            ZVAL_NULL(&retval);
                             
-                            if (call_user_function(NULL, &ctx->task_callback, &ctx->task_callback, &retval, 2, args) == SUCCESS) {
-                                // 序列化返回结果
-                                smart_str buf = {0};
-                                php_serialize_data_t serialize_data;
-                                PHP_VAR_SERIALIZE_INIT(serialize_data);
-                                php_var_serialize(&buf, &retval, &serialize_data);
-                                smart_str_0(&buf);
-                                PHP_VAR_SERIALIZE_DESTROY(serialize_data);
+                            zend_fcall_info fci;
+                            zend_fcall_info_cache fcc;
+                            
+                            if (zend_fcall_info_init(&ctx->task_callback, 0, &fci, &fcc, NULL, NULL) == SUCCESS) {
+                                zval args[2];
+                                ZVAL_LONG(&args[0], msg_hdr.task_id);
+                                ZVAL_COPY(&args[1], &task_data);
                                 
-                                // 发送结果回 Worker
-                                task_result_t result_hdr;
-                                result_hdr.task_id = msg_hdr.task_id;
-                                result_hdr.success = 1;
-                                result_hdr.result_len = ZSTR_LEN(buf.s);
+                                fci.retval = &retval;
+                                fci.param_count = 2;
+                                fci.params = args;
                                 
-                                write(sockfd, &result_hdr, sizeof(result_hdr));
-                                if (result_hdr.result_len > 0) {
-                                    write(sockfd, ZSTR_VAL(buf.s), result_hdr.result_len);
+                                if (zend_call_function(&fci, &fcc) == SUCCESS) {
+                                    // 序列化返回结果
+                                    smart_str buf = {0};
+                                    php_serialize_data_t serialize_data;
+                                    PHP_VAR_SERIALIZE_INIT(serialize_data);
+                                    php_var_serialize(&buf, &retval, &serialize_data);
+                                    smart_str_0(&buf);
+                                    PHP_VAR_SERIALIZE_DESTROY(serialize_data);
+                                    
+                                    // 发送结果回 Worker
+                                    task_result_t result_hdr;
+                                    result_hdr.task_id = msg_hdr.task_id;
+                                    result_hdr.success = 1;
+                                    result_hdr.result_len = buf.s ? ZSTR_LEN(buf.s) : 0;
+                                    
+                                    write(sockfd, &result_hdr, sizeof(result_hdr));
+                                    if (result_hdr.result_len > 0) {
+                                        write(sockfd, ZSTR_VAL(buf.s), result_hdr.result_len);
+                                    }
+                                    
+                                    smart_str_free(&buf);
                                 }
                                 
-                                smart_str_free(&buf);
                                 zval_ptr_dtor(&retval);
+                                zval_ptr_dtor(&args[0]);
+                                zval_ptr_dtor(&args[1]);
+                            } else {
+                                fprintf(stderr, "[Task-%d] Failed to initialize callback for task #%lu\n", 
+                                       ctx->task_worker_id, msg_hdr.task_id);
                             }
-                            
-                            zval_ptr_dtor(&args[0]);
-                            zval_ptr_dtor(&args[1]);
+                        } else {
+                            fprintf(stderr, "[Task-%d] onTask callback not set or not callable\n", ctx->task_worker_id);
                         }
                         
                         zval_ptr_dtor(&task_data);
@@ -2964,17 +2985,28 @@ void sip_handle_task_result(SipContext *ctx, int sockfd) {
                 const unsigned char *p = (const unsigned char *)result_data;
                 if (php_var_unserialize(&result_zval, &p, p + result_hdr.result_len, &var_hash)) {
                     // 调用 PHP onTaskFinish 回调
-                    if (Z_TYPE(ctx->task_finish_callback) == IS_OBJECT) {
+                    if (!Z_ISUNDEF(ctx->task_finish_callback) && zend_is_callable(&ctx->task_finish_callback, 0, NULL)) {
                         zval retval;
-                        zval args[2];
-                        ZVAL_LONG(&args[0], result_hdr.task_id);
-                        ZVAL_COPY(&args[1], &result_zval);
+                        ZVAL_NULL(&retval);
                         
-                        call_user_function(NULL, &ctx->task_finish_callback, &ctx->task_finish_callback, &retval, 2, args);
+                        zend_fcall_info fci;
+                        zend_fcall_info_cache fcc;
                         
-                        zval_ptr_dtor(&retval);
-                        zval_ptr_dtor(&args[0]);
-                        zval_ptr_dtor(&args[1]);
+                        if (zend_fcall_info_init(&ctx->task_finish_callback, 0, &fci, &fcc, NULL, NULL) == SUCCESS) {
+                            zval args[2];
+                            ZVAL_LONG(&args[0], result_hdr.task_id);
+                            ZVAL_COPY(&args[1], &result_zval);
+                            
+                            fci.retval = &retval;
+                            fci.param_count = 2;
+                            fci.params = args;
+                            
+                            zend_call_function(&fci, &fcc);
+                            
+                            zval_ptr_dtor(&retval);
+                            zval_ptr_dtor(&args[0]);
+                            zval_ptr_dtor(&args[1]);
+                        }
                     }
                     
                     zval_ptr_dtor(&result_zval);

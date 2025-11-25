@@ -27,7 +27,7 @@ $sipServer = new ExoSip([
     'pid_file' => '/tmp/gb28181_server.pid',
     
     // Master-Worker-Task 多进程配置
-    'task_worker_num' => 1,
+    'task_worker_num' => 2,
     
     // 定时器配置（单位：毫秒）
     'timer_interval' => 30000,  // 30秒检查一次设备超时

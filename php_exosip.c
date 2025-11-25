@@ -1123,9 +1123,15 @@ PHP_METHOD(ExoSip, run) {
         // 绑定 Task 回调到 SipContext（在 fork 前）
         if (!Z_ISUNDEF(obj->onTask)) {
             ZVAL_COPY(&obj->ctx->task_callback, &obj->onTask);
+            php_printf("[DEBUG] onTask callback set before fork\n");
+        } else {
+            php_printf("[DEBUG] onTask callback is not set\n");
         }
         if (!Z_ISUNDEF(obj->onTaskFinish)) {
             ZVAL_COPY(&obj->ctx->task_finish_callback, &obj->onTaskFinish);
+            php_printf("[DEBUG] onTaskFinish callback set before fork\n");
+        } else {
+            php_printf("[DEBUG] onTaskFinish callback is not set\n");
         }
         
         if (sip_start_master_process(obj->ctx) < 0) {
