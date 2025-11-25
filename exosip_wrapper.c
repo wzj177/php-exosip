@@ -81,6 +81,9 @@ SipContext* sip_init(ServerInfo *info) {
     ctx->worker_restart_count = 0;
     ZVAL_UNDEF(&ctx->task_callback);
     ZVAL_UNDEF(&ctx->task_finish_callback);
+    ZVAL_UNDEF(&ctx->pipe_message_callback);
+    ctx->pipe_msg_counter = 0;
+    ctx->task_sockfd = -1;
     
     int debug = info->debug;
     
@@ -2750,6 +2753,7 @@ int sip_fork_task_workers(SipContext *ctx) {
             ctx->is_worker = 0;
             ctx->is_task = 1;
             ctx->task_worker_id = i;
+            ctx->task_sockfd = sv[1];  // 保存Task进程的socketpair fd
             
             fprintf(stderr, "[Task-%d] Started PID=%d\n", i, getpid());
             sip_task_loop(ctx, sv[1]);
@@ -2897,6 +2901,7 @@ void sip_task_loop(SipContext *ctx, int sockfd) {
                                     result_hdr.task_id = msg_hdr.task_id;
                                     result_hdr.success = 1;
                                     result_hdr.result_len = buf.s ? ZSTR_LEN(buf.s) : 0;
+                                    result_hdr.type = 0;  // 0表示任务结果
                                     
                                     write(sockfd, &result_hdr, sizeof(result_hdr));
                                     if (result_hdr.result_len > 0) {
@@ -2950,6 +2955,7 @@ unsigned long sip_add_task(SipContext *ctx, const char *serialized_data, size_t 
     task_msg_t msg_hdr;
     msg_hdr.task_id = task_id;
     msg_hdr.data_len = data_len;
+    msg_hdr.type = 0;  // 0表示Worker→Task任务
     
     pthread_mutex_lock(&ctx->lock);
     
@@ -2972,53 +2978,84 @@ void sip_handle_task_result(SipContext *ctx, int sockfd) {
     task_result_t result_hdr;
     ssize_t n = read(sockfd, &result_hdr, sizeof(result_hdr));
     
-    if (n == sizeof(result_hdr)) {
-        char *result_data = NULL;
-        if (result_hdr.result_len > 0) {
-            result_data = (char*)malloc(result_hdr.result_len);
-            if (result_data && read(sockfd, result_data, result_hdr.result_len) == (ssize_t)result_hdr.result_len) {
-                // 反序列化 PHP 返回值
-                zval result_zval;
-                php_unserialize_data_t var_hash;
-                PHP_VAR_UNSERIALIZE_INIT(var_hash);
-                
-                const unsigned char *p = (const unsigned char *)result_data;
-                if (php_var_unserialize(&result_zval, &p, p + result_hdr.result_len, &var_hash)) {
-                    // 调用 PHP onTaskFinish 回调
-                    if (!Z_ISUNDEF(ctx->task_finish_callback) && zend_is_callable(&ctx->task_finish_callback, 0, NULL)) {
-                        zval retval;
-                        ZVAL_NULL(&retval);
-                        
-                        zend_fcall_info fci;
-                        zend_fcall_info_cache fcc;
-                        
-                        if (zend_fcall_info_init(&ctx->task_finish_callback, 0, &fci, &fcc, NULL, NULL) == SUCCESS) {
-                            zval args[2];
-                            ZVAL_LONG(&args[0], result_hdr.task_id);
-                            ZVAL_COPY(&args[1], &result_zval);
-                            
-                            fci.retval = &retval;
-                            fci.param_count = 2;
-                            fci.params = args;
-                            
-                            zend_call_function(&fci, &fcc);
-                            
-                            zval_ptr_dtor(&retval);
-                            zval_ptr_dtor(&args[0]);
-                            zval_ptr_dtor(&args[1]);
-                        }
-                    }
-                    
-                    zval_ptr_dtor(&result_zval);
-                }
-                
-                PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
-                free(result_data);
-            } else {
-                free(result_data);
-            }
+    if (n != sizeof(result_hdr)) {
+        return;
+    }
+    
+    char *result_data = NULL;
+    if (result_hdr.result_len > 0) {
+        result_data = (char*)malloc(result_hdr.result_len);
+        if (!result_data || read(sockfd, result_data, result_hdr.result_len) != (ssize_t)result_hdr.result_len) {
+            if (result_data) free(result_data);
+            return;
         }
     }
+    
+    // 反序列化 PHP 数据
+    zval result_zval;
+    php_unserialize_data_t var_hash;
+    PHP_VAR_UNSERIALIZE_INIT(var_hash);
+    
+    const unsigned char *p = (const unsigned char *)result_data;
+    int unserialize_success = result_data && php_var_unserialize(&result_zval, &p, p + result_hdr.result_len, &var_hash);
+    
+    if (unserialize_success) {
+        // 根据type区分消息类型
+        if (result_hdr.type == 0) {
+            // 任务结果 - 调用 onTaskFinish
+            if (!Z_ISUNDEF(ctx->task_finish_callback) && zend_is_callable(&ctx->task_finish_callback, 0, NULL)) {
+                zval retval;
+                ZVAL_NULL(&retval);
+                
+                zend_fcall_info fci;
+                zend_fcall_info_cache fcc;
+                
+                if (zend_fcall_info_init(&ctx->task_finish_callback, 0, &fci, &fcc, NULL, NULL) == SUCCESS) {
+                    zval args[2];
+                    ZVAL_LONG(&args[0], result_hdr.task_id);
+                    ZVAL_COPY(&args[1], &result_zval);
+                    
+                    fci.retval = &retval;
+                    fci.param_count = 2;
+                    fci.params = args;
+                    
+                    zend_call_function(&fci, &fcc);
+                    
+                    zval_ptr_dtor(&retval);
+                    zval_ptr_dtor(&args[0]);
+                    zval_ptr_dtor(&args[1]);
+                }
+            }
+        } else if (result_hdr.type == 1) {
+            // 主动推送 - 调用 onPipeMessage
+            if (!Z_ISUNDEF(ctx->pipe_message_callback) && zend_is_callable(&ctx->pipe_message_callback, 0, NULL)) {
+                zval retval;
+                ZVAL_NULL(&retval);
+                
+                zend_fcall_info fci;
+                zend_fcall_info_cache fcc;
+                
+                if (zend_fcall_info_init(&ctx->pipe_message_callback, 0, &fci, &fcc, NULL, NULL) == SUCCESS) {
+                    zval args[1];
+                    ZVAL_COPY(&args[0], &result_zval);
+                    
+                    fci.retval = &retval;
+                    fci.param_count = 1;
+                    fci.params = args;
+                    
+                    zend_call_function(&fci, &fcc);
+                    
+                    zval_ptr_dtor(&retval);
+                    zval_ptr_dtor(&args[0]);
+                }
+            }
+        }
+        
+        zval_ptr_dtor(&result_zval);
+    }
+    
+    PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+    if (result_data) free(result_data);
 }
 
 // ==================== 进程状态查询 ====================
@@ -3335,6 +3372,50 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
     }
     
     add_assoc_string(status_array, "pid_file", (char*)pid_file);
+    
+    return 0;
+}
+
+// ==================== Task → Worker 主动通信 ====================
+
+/**
+ * Task进程主动发送消息到Worker
+ * @param ctx SIP上下文
+ * @param data 序列化的PHP数据
+ * @param len 数据长度
+ * @return 0=成功, -1=失败
+ */
+int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len) {
+    if (!ctx || !ctx->is_task) {
+        fprintf(stderr, "[Error] sendToWorker can only be called in Task process\n");
+        return -1;
+    }
+    
+    if (!data || len == 0) {
+        fprintf(stderr, "[Error] sendToWorker: empty data\n");
+        return -1;
+    }
+    
+    // 构造消息头
+    task_result_t msg_hdr;
+    msg_hdr.task_id = ++ctx->pipe_msg_counter;
+    msg_hdr.success = 1;
+    msg_hdr.result_len = len;
+    msg_hdr.type = 1;  // 1表示Task→Worker主动推送
+    
+    // 发送到Worker (通过socketpair)
+    ssize_t n = write(ctx->task_sockfd, &msg_hdr, sizeof(msg_hdr));
+    if (n == sizeof(msg_hdr) && len > 0) {
+        n = write(ctx->task_sockfd, data, len);
+    }
+    
+    if (n < 0) {
+        perror("[Task] Failed to send to worker");
+        return -1;
+    }
+    
+    fprintf(stderr, "[Task-%d] Sent pipe message #%lu to Worker (%zu bytes)\n", 
+           ctx->task_worker_id, msg_hdr.task_id, len);
     
     return 0;
 }

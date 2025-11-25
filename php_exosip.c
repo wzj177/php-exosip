@@ -79,6 +79,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_addtask, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, data, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendtoworker, 0, 0, 1)
+    ZEND_ARG_INFO(0, data)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getprocessstatus, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
@@ -535,6 +539,7 @@ typedef struct _php_exosip_obj {
     /* Master-Worker-Task Support */
     zval onTask;         // Task 进程回调
     zval onTaskFinish;   // Task 完成回调（Worker 进程）
+    zval onPipeMessage;  // Pipe 消息回调（Task→Worker主动推送）
     
     /* Universal SIP Configuration */
     HashTable *config;   // 服务器配置参数
@@ -650,6 +655,7 @@ static void php_exosip_free_obj(zend_object *object) {
         /* Master-Worker-Task */
         SAFE_ZVAL_DTOR(obj->onTask);
         SAFE_ZVAL_DTOR(obj->onTaskFinish);
+        SAFE_ZVAL_DTOR(obj->onPipeMessage);
         
         #undef SAFE_ZVAL_DTOR
     }
@@ -706,6 +712,7 @@ static zval *exosip_read_property(zend_object *object, zend_string *member, int 
     /* Master-Worker-Task */
     if (strcmp(prop_name, "onTask") == 0) return &obj->onTask;
     if (strcmp(prop_name, "onTaskFinish") == 0) return &obj->onTaskFinish;
+    if (strcmp(prop_name, "onPipeMessage") == 0) return &obj->onPipeMessage;
     
     return zend_std_read_property(object, member, type, cache_slot, rv);
 }
@@ -757,6 +764,7 @@ static zval *exosip_write_property(zend_object *object, zend_string *member, zva
     /* Master-Worker-Task */
     if (strcmp(prop_name, "onTask") == 0) { ZVAL_COPY(&obj->onTask, value); return &obj->onTask; }
     if (strcmp(prop_name, "onTaskFinish") == 0) { ZVAL_COPY(&obj->onTaskFinish, value); return &obj->onTaskFinish; }
+    if (strcmp(prop_name, "onPipeMessage") == 0) { ZVAL_COPY(&obj->onPipeMessage, value); return &obj->onPipeMessage; }
     
     return zend_std_write_property(object, member, value, cache_slot);
 }
@@ -795,6 +803,7 @@ static zend_object *php_exosip_create_object(zend_class_entry *ce) {
     ZVAL_UNDEF(&obj->onTimer);  // 定时器回调
     ZVAL_UNDEF(&obj->onTask);
     ZVAL_UNDEF(&obj->onTaskFinish);
+    ZVAL_UNDEF(&obj->onPipeMessage);
     
     return &obj->std;
 }
@@ -1132,6 +1141,12 @@ PHP_METHOD(ExoSip, run) {
             php_printf("[DEBUG] onTaskFinish callback set before fork\n");
         } else {
             php_printf("[DEBUG] onTaskFinish callback is not set\n");
+        }
+        if (!Z_ISUNDEF(obj->onPipeMessage)) {
+            ZVAL_COPY(&obj->ctx->pipe_message_callback, &obj->onPipeMessage);
+            php_printf("[DEBUG] onPipeMessage callback set before fork\n");
+        } else {
+            php_printf("[DEBUG] onPipeMessage callback is not set\n");
         }
         
         if (sip_start_master_process(obj->ctx) < 0) {
@@ -2098,6 +2113,49 @@ PHP_METHOD(ExoSip, addTask) {
     RETURN_LONG(task_id);
 }
 
+/* ========== ExoSip::sendToWorker($data) ========== */
+PHP_METHOD(ExoSip, sendToWorker) {
+    zval *data;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "ExoSip not initialized");
+        RETURN_FALSE;
+    }
+    
+    if (!obj->ctx->is_task) {
+        php_error_docref(NULL, E_WARNING, "sendToWorker can only be called from Task process");
+        RETURN_FALSE;
+    }
+    
+    // Serialize data
+    smart_str buf = {0};
+    php_serialize_data_t var_hash;
+    PHP_VAR_SERIALIZE_INIT(var_hash);
+    php_var_serialize(&buf, data, &var_hash);
+    PHP_VAR_SERIALIZE_DESTROY(var_hash);
+    smart_str_0(&buf);
+    
+    if (!buf.s) {
+        php_error_docref(NULL, E_WARNING, "Failed to serialize data");
+        RETURN_FALSE;
+    }
+    
+    int result = sip_task_send_to_worker(obj->ctx, ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+    smart_str_free(&buf);
+    
+    if (result < 0) {
+        RETURN_FALSE;
+    }
+    
+    RETURN_TRUE;
+}
+
 /* ========== ExoSip::getProcessStatus() ========== */
 PHP_METHOD(ExoSip, getProcessStatus) {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -2154,6 +2212,7 @@ const zend_function_entry exosip_methods[] = {
     
     /* Master-Worker-Task */
     PHP_ME(ExoSip, addTask, arginfo_exosip_addtask, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendToWorker, arginfo_exosip_sendtoworker, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getProcessStatus, arginfo_exosip_getprocessstatus, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getRunStatus, arginfo_exosip_getrunstatus, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     

@@ -260,12 +260,18 @@ typedef struct _sip_context {
     RawData *raw_data_buffer;
     int raw_data_size;
     
+    // Pipe message callback (Task→Worker主动推送)
+    zval pipe_message_callback;
+    unsigned long pipe_msg_counter;  // 管道消息计数器
+    int task_sockfd;                 // Task进程保存的socketpair fd
+    
 } SipContext;
 
 // 任务消息结构（socketpair传递）
 typedef struct {
     unsigned long task_id;
     size_t data_len;
+    char type;                // 0=Worker→Task任务, 1=Task→Worker主动推送
     char data[0];
 } task_msg_t;
 
@@ -274,6 +280,7 @@ typedef struct {
     unsigned long task_id;
     int success;
     size_t result_len;
+    char type;                // 0=任务结果, 1=主动推送消息
     char result[0];
 } task_result_t;
 
@@ -355,6 +362,9 @@ int sip_send_catalog_query(SipContext *ctx, const char *device_id);
 int sip_send_device_info_query(SipContext *ctx, const char *device_id);
 int sip_send_ptz_control(SipContext *ctx, const char *device_id, const char *channel_id, int cmd, int speed);
 int sip_send_keepalive_response(SipContext *ctx, int tid);
+
+// Task进程主动发送消息到Worker
+int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len);
 
 // 消息解析
 int parse_gb28181_message(const char *xml, GB28181Message *msg);

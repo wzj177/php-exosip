@@ -229,6 +229,32 @@ class ExoSip {
     public $onTimer;
     
     /**
+     * Pipe message handler - Receive messages from Task process (Task→Worker communication)
+     * Runs in Worker process, triggered when Task calls sendToWorker()
+     * @var callable(mixed $data): void
+     * 
+     * @example
+     * ```php
+     * $sip->onPipeMessage = function($server, $data) {
+     *     $type = $data['type'] ?? 'unknown';
+     *     
+     *     switch ($type) {
+     *         case 'device_info':
+     *             // Handle device info pushed from Task
+     *             echo "Device: {$data['device_id']}\n";
+     *             break;
+     *             
+     *         case 'progress':
+     *             // Handle progress updates
+     *             echo "Progress: {$data['percentage']}%\n";
+     *             break;
+     *     }
+     * };
+     * ```
+     */
+    public $onPipeMessage;
+    
+    /**
      * Create and optionally initialize SIP server
      * 
      * @param array|null $config Optional configuration:
@@ -488,6 +514,55 @@ class ExoSip {
     public function addTask(array $data): int {}
     
     /**
+     * Send data to Worker process (Task process only)
+     * 
+     * Allows Task processes to proactively push messages to Worker.
+     * Used for real-time notifications, progress updates, etc.
+     * 
+     * @param mixed $data Data to send (will be serialized)
+     * @return bool True on success, false on failure
+     * @throws Exception If called from non-Task process
+     * 
+     * @example
+     * ```php
+     * // In Task process (onTask callback)
+     * $sip->onTask = function($server, $taskId, $data) {
+     *     // Do some work
+     *     $result = queryDatabase($data['id']);
+     *     
+     *     // Push result to Worker immediately (don't wait for return)
+     *     $server->sendToWorker([
+     *         'type' => 'db_result',
+     *         'data' => $result,
+     *         'timestamp' => time()
+     *     ]);
+     *     
+     *     // Continue processing...
+     *     $moreData = callExternalAPI();
+     *     
+     *     // Push progress update
+     *     $server->sendToWorker([
+     *         'type' => 'progress',
+     *         'percentage' => 50
+     *     ]);
+     *     
+     *     return ['status' => 'success'];
+     * };
+     * 
+     * // In Worker process (onPipeMessage callback)
+     * $sip->onPipeMessage = function($server, $data) {
+     *     if ($data['type'] === 'db_result') {
+     *         // Handle database result
+     *         processResult($data['data']);
+     *     } else if ($data['type'] === 'progress') {
+     *         echo "Progress: {$data['percentage']}%\n";
+     *     }
+     * };
+     * ```
+     */
+    public function sendToWorker($data): bool {}
+    
+    /**
      * Get process status (internal call, from running process)
      * 
      * @return array Process status information:
@@ -649,16 +724,42 @@ class SipEvent {
     /**
      * Get SIP header value
      * 
-     * @param string $name Header name (e.g., 'Authorization', 'WWW-Authenticate')
+     * @param string $name Header name (e.g., 'Authorization', 'WWW-Authenticate', 'Via')
      * @return string|null Header value, or null if not found
      * 
      * @example
      * ```php
      * $auth = $event->getHeader('Authorization');
      * $wwwAuth = $event->getHeader('WWW-Authenticate');
+     * $via = $event->getHeader('Via');  // For received parameter
      * ```
      */
     public function getHeader(string $name): ?string {}
+    
+    /**
+     * Get file descriptor (TCP mode only)
+     * 
+     * Returns the TCP connection file descriptor for this event.
+     * Used in TCP mode for connection binding and management.
+     * 
+     * @return int File descriptor (>0 for TCP), 0 for UDP
+     * 
+     * @example
+     * ```php
+     * $sip->onRegister = function($event) use ($deviceManager) {
+     *     $mode = $this->getConfig()['mode'] ?? 'udp';
+     *     
+     *     if ($mode === 'tcp' || $mode === 'tls') {
+     *         $fd = $event->getFd();
+     *         if ($fd > 0) {
+     *             $deviceId = extractDeviceId($event);
+     *             $deviceManager->bindConnection($deviceId, $fd);
+     *         }
+     *     }
+     * };
+     * ```
+     */
+    public function getFd(): int {}
 }
 
 /**

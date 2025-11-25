@@ -6,6 +6,9 @@
 
 - ✅ **纯面向对象** - 简洁的 OOP API
 - ✅ **事件驱动** - 支持所有 RFC 3261 SIP 方法
+- ✅ **Master-Worker-Task 架构** - 多进程高并发支持
+- ✅ **Task→Worker 管道通信** - 实时双向消息推送
+- ✅ **TCP/UDP 双模式** - 完整的连接管理
 - ✅ **GB28181 支持** - 国标视频监控协议
 - ✅ **跨平台** - Linux/macOS/Windows
 - ✅ **生产就绪** - 经过压测验证（1000+并发）
@@ -29,14 +32,21 @@
 
 ```
 Master (监控) → Worker (SIP 事件循环) → Task Pool (异步任务)
+                    ↕ (pipe 双向通信)
 ```
 
 **优势**：
 - ✅ SIP 事件循环永不阻塞
 - ✅ Worker 崩溃自动恢复
 - ✅ 高并发异步处理（HTTP、数据库、Redis）
+- ✅ Task→Worker 实时推送（sendToWorker）
+- ✅ TCP 连接管理（device_id ↔ fd 映射）
 
-**详细文档**：[Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
+**详细文档**：
+- [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
+- [Task→Worker 管道通信](docs/MASTER_WORKER_TASK_IMPLEMENTATION.md)
+- [TCP 模式支持](docs/TCP_MODE_SUPPORT.md)
+- [Task 进程安全性](docs/TASK_SERVER_OBJECT_SAFETY.md)
 
 ### 2. 单进程模式（适合小型应用）
 
@@ -265,13 +275,26 @@ public static function getRunStatus(string $pidFile): array  // 从外部查询�
 // 异步任务处理（在 Task 进程中执行）
 public $onTask = function(int $taskId, array $data) {
     // 执行耗时操作（HTTP、数据库、Redis）
-    return ['status' => 'success', 'result' => $data];
+    $result = doSomeWork($data);
+    
+    // 实时推送结果给 Worker（不用等 return）
+    $this->sendToWorker(['type' => 'progress', 'data' => $result]);
+    
+    return ['status' => 'success'];
 };
 
 // 任务完成回调（在 Worker 进程中执行）
 public $onTaskFinish = function(int $taskId, $result) {
-    // 处理 onTask 的返回值
-    echo "Task #{$taskId} result: " . json_encode($result) . "\n";
+    // 处理 onTask 的 return 值
+    echo "Task #{$taskId} finished: " . json_encode($result) . "\n";
+};
+
+// 管道消息回调（在 Worker 进程中执行）
+public $onPipeMessage = function($server, $data) {
+    // 处理 Task 通过 sendToWorker() 推送的消息
+    if ($data['type'] === 'progress') {
+        echo "Progress update: " . json_encode($data['data']) . "\n";
+    }
 };
 
 // 定时器（在 Worker 进程中执行）
@@ -746,9 +769,22 @@ php examples/test_event_debug.php
 - [GB/T 28181-2016](https://openstd.samr.gov.cn/)
 
 ### 项目文档
-- [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md) ⭐️
+
+**核心架构** ⭐️
+- [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
+- [Task→Worker 管道通信实现](docs/MASTER_WORKER_TASK_IMPLEMENTATION.md)
+- [TCP 模式支持](docs/TCP_MODE_SUPPORT.md)
+- [Task 进程安全性分析](docs/TASK_SERVER_OBJECT_SAFETY.md)
+
+**开发指南**
+- [回调错误处理](docs/CALLBACK_ERROR_HANDLING.md)
+- [SIP 客户端实现](docs/CLIENT_IMPLEMENTATION.md)
+- [快速开始](docs/QUICKSTART.md)
 - [平台支持说明](docs/PLATFORM_SUPPORT.md)
-- [IDE 支持文件](docs/exosip.stub.php)
+
+**API 参考**
+- [IDE 支持文件 (exosip.stub.php)](docs/exosip.stub.php)
+- [文档索引](docs/README.md)
 
 ### 示例项目
 - [GB28181-Service](examples/GB28181-Service/) - C++ 参考实现
@@ -763,6 +799,39 @@ MIT License
 欢迎提交 Issue 和 Pull Request。
 
 ## 更新日志
+
+### v2.2.0 (2024-11-25) 🎉
+
+**三大核心功能完成:**
+
+#### ✅ Task 1: C 层管道通信
+- 实现 Task→Worker 双向通信机制
+- 修改 `task_msg_t` 和 `task_result_t` 添加 `type` 字段
+- 实现 `sip_task_send_to_worker()` 函数
+- 修改 `sip_handle_task_result()` 区分消息类型
+
+#### ✅ Task 2: PHP API 层
+- 添加 `onPipeMessage` 回调(Worker 接收 Task 推送)
+- 实现 `sendToWorker($data)` 方法(Task 推送给 Worker)
+- 完整的属性读写处理器和初始化
+- 创建测试示例: `test_pipe_message.php`, `test_laravel_integration.php`
+
+#### ✅ Task 3: TCP 传输模式支持
+- DeviceManager 添加双向映射: `device_id ↔ fd`
+- 实现 8 个连接管理方法(bind/unbind/get/has)
+- GB28181Handler 自动处理 TCP 连接
+- SipEvent 添加 `getFd()` 方法
+- 创建完整文档: `TCP_MODE_SUPPORT.md`
+
+**架构增强:**
+- ✅ Laravel 集成架构: Laravel → Redis → Task → Worker → Device
+- ✅ 进程安全文档: `TASK_SERVER_OBJECT_SAFETY.md`
+- ✅ 完整测试覆盖: 管道通信、Laravel 集成、TCP 模式
+
+**文档完善:**
+- 更新 `exosip.stub.php` 添加所有新 API
+- 创建 `docs/README.md` 文档索引
+- 整理并归类所有技术文档
 
 ### v2.1.0 (2024)
 - ✅ **Master-Worker-Task 多进程架构**
@@ -789,4 +858,12 @@ MIT License
 
 **Ready for Production** ✨
 
-查看完整架构说明：[Master-Worker-Task 架构文档](docs/MASTER_WORKER_TASK.md)
+**完整功能清单:**
+- ✅ Master-Worker-Task 多进程架构
+- ✅ Task→Worker 实时管道通信
+- ✅ TCP/UDP 双模式连接管理
+- ✅ GB28181 国标协议完整支持
+- ✅ Laravel 集成架构
+- ✅ 异常安全保护
+
+查看完整文档：[docs/README.md](docs/README.md)
