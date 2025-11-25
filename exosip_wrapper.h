@@ -205,6 +205,7 @@ typedef struct _sip_context {
     // 服务器配置
     ServerInfo server_info;
     int running;
+    char local_ip[64];          // 实际本地 IP（从 socket 获取）
     
     // 连接管理
     ConnectionInfo connections[MAX_CONNECTIONS];

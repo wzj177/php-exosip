@@ -8,6 +8,9 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <dirent.h>
 #include "ext/standard/php_var.h"
 #include "zend_smart_str.h"
@@ -165,6 +168,61 @@ SipContext* sip_init(ServerInfo *info) {
     }
     
     if (debug) fprintf(stderr, "[OK] Listen successful on %s\n", mode);
+    
+    // 获取实际本地 IP（尝试多个外部地址）
+    memset(ctx->local_ip, 0, sizeof(ctx->local_ip));
+    const char *test_addrs[] = {"8.8.8.8", "114.114.114.114", "1.1.1.1", NULL};
+    
+    for (int i = 0; test_addrs[i] != NULL && strlen(ctx->local_ip) == 0; i++) {
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock >= 0) {
+            struct sockaddr_in addr;
+            memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(53);
+            inet_pton(AF_INET, test_addrs[i], &addr.sin_addr);
+            
+            if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                struct sockaddr_in name;
+                socklen_t namelen = sizeof(name);
+                if (getsockname(sock, (struct sockaddr*)&name, &namelen) == 0) {
+                    inet_ntop(AF_INET, &name.sin_addr, ctx->local_ip, sizeof(ctx->local_ip));
+                    if (debug) fprintf(stderr, "[INFO] Detected local IP: %s (via %s)\n", ctx->local_ip, test_addrs[i]);
+                }
+            }
+            close(sock);
+        }
+    }
+    
+    // 如果检测失败，使用配置的 IP（如果不是 0.0.0.0）
+    if (strlen(ctx->local_ip) == 0 && use_ip && strcmp(use_ip, "0.0.0.0") != 0) {
+        strncpy(ctx->local_ip, use_ip, sizeof(ctx->local_ip) - 1);
+        if (debug) fprintf(stderr, "[INFO] Using configured IP: %s\n", ctx->local_ip);
+    }
+    
+    // 如果还是失败，尝试读取网卡 IP
+    if (strlen(ctx->local_ip) == 0) {
+        struct ifaddrs *ifaddr, *ifa;
+        if (getifaddrs(&ifaddr) == 0) {
+            for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+                if (ifa->ifa_addr == NULL) continue;
+                
+                if (ifa->ifa_addr->sa_family == AF_INET) {
+                    struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &addr->sin_addr, ip_str, sizeof(ip_str));
+                    
+                    // 排除回环地址和 169.254.x.x
+                    if (strncmp(ip_str, "127.", 4) != 0 && strncmp(ip_str, "169.254.", 8) != 0) {
+                        strncpy(ctx->local_ip, ip_str, sizeof(ctx->local_ip) - 1);
+                        if (debug) fprintf(stderr, "[INFO] Detected local IP from interface %s: %s\n", ifa->ifa_name, ip_str);
+                        break;
+                    }
+                }
+            }
+            freeifaddrs(ifaddr);
+        }
+    }
     
     ZVAL_UNDEF(&ctx->event_callback);
     ZVAL_UNDEF(&ctx->connection_callback);
@@ -706,7 +764,11 @@ int sip_send_catalog_query(SipContext *ctx, const char *device_id) {
         "</Query>\r\n",
         sn, device_id);
     
-    int ret = sip_send_message(ctx, conn->contact_uri, "Application/MANSCDP+xml", xml_body);
+    // 构造目标URI：使用实际来源IP（conn->ip），而不是Contact头的内网IP
+    char to_uri[256];
+    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    
+    int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
     free(sn);
     return ret;
@@ -731,7 +793,11 @@ int sip_send_device_info_query(SipContext *ctx, const char *device_id) {
         "</Query>\r\n",
         sn, device_id);
     
-    int ret = sip_send_message(ctx, conn->contact_uri, "Application/MANSCDP+xml", xml_body);
+    // 构造目标URI：使用实际来源IP
+    char to_uri[256];
+    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    
+    int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
     free(sn);
     return ret;
@@ -761,7 +827,11 @@ int sip_send_ptz_control(SipContext *ctx, const char *device_id, const char *cha
         "</Control>\r\n",
         sn, channel_id, ptz_cmd_hex);
     
-    int ret = sip_send_message(ctx, conn->contact_uri, "Application/MANSCDP+xml", xml_body);
+    // 构造目标URI：使用实际来源IP
+    char to_uri[256];
+    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    
+    int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
     free(sn);
     return ret;
@@ -1281,18 +1351,50 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
                 }
                 
                 if (conn) {
-                    // 更新连接信息
+                    // 【关键修正】必须使用Via头的received参数（实际来源IP），而不是Contact头的内网IP
+                    // Via: SIP/2.0/UDP 10.38.224.158:15060;rport=15060;branch=xxx;received=192.168.100.169
+                    // Contact: <sip:34020000001320948622@10.38.224.158:15060> （这是内网地址，不能用！）
+                    
                     osip_via_t *via = NULL;
                     osip_message_get_via(evt->request, 0, &via);
-                    if (via && via->host) {
-                        strncpy(conn->ip, via->host, sizeof(conn->ip) - 1);
-                        conn->port = via->port ? atoi(via->port) : 5060;
+                    
+                    // 优先使用Via的received参数（NAT后的真实IP）
+                    if (via) {
+                        osip_generic_param_t *received_param = NULL;
+                        osip_via_param_get_byname(via, "received", &received_param);
+                        if (received_param && received_param->gvalue) {
+                            // 使用received参数的IP（实际来源地址）
+                            strncpy(conn->ip, received_param->gvalue, sizeof(conn->ip) - 1);
+                            conn->ip[sizeof(conn->ip) - 1] = '\0';
+                        } else if (via->host) {
+                            // 如果没有received参数，使用Via的host（无NAT情况）
+                            strncpy(conn->ip, via->host, sizeof(conn->ip) - 1);
+                            conn->ip[sizeof(conn->ip) - 1] = '\0';
+                        }
+                        
+                        // 使用rport参数获取实际端口
+                        osip_generic_param_t *rport_param = NULL;
+                        osip_via_param_get_byname(via, "rport", &rport_param);
+                        if (rport_param && rport_param->gvalue) {
+                            conn->port = atoi(rport_param->gvalue);
+                        } else if (via->port) {
+                            conn->port = atoi(via->port);
+                        } else {
+                            conn->port = 5060;  // 默认SIP端口
+                        }
                     }
+                    
+                    // 保存Contact URI（仅用于日志和调试）
                     strncpy(conn->contact_uri, contact_uri, sizeof(conn->contact_uri) - 1);
                     strncpy(conn->user_agent, user_agent, sizeof(conn->user_agent) - 1);
                     conn->last_seen = time(NULL);
                     conn->register_count++;
                     conn->state = CONN_STATE_REGISTERED;
+                    
+                    if (debug) {
+                        fprintf(stderr, "[DEBUG] Device %s registered from %s:%d (Contact: %s)\n",
+                                device_id, conn->ip, conn->port, conn->contact_uri);
+                    }
                 }
             }
         }
@@ -1389,30 +1491,117 @@ int exosip_send_message_with_content_type(SipContext *ctx, const char *to, const
     }
 
     int debug = ctx->server_info.debug;
+    
+    // GB28181 使用 realm（域）而非 IP:Port
     char from_uri[256];
-    snprintf(from_uri, sizeof(from_uri), "sip:%s@%s:%d", 
-             ctx->server_info.sipId, ctx->server_info.ip, ctx->server_info.port);
+    if (ctx->server_info.sipRealm && strlen(ctx->server_info.sipRealm) > 0) {
+        // 使用 realm（符合 GB28181 规范）
+        snprintf(from_uri, sizeof(from_uri), "sip:%s@%s", 
+                 ctx->server_info.sipId, ctx->server_info.sipRealm);
+    } else {
+        // 回退到 IP:Port（非 GB28181 场景）
+        const char *from_ip = (strlen(ctx->local_ip) > 0) ? ctx->local_ip : ctx->server_info.ip;
+        snprintf(from_uri, sizeof(from_uri), "sip:%s@%s:%d", 
+                 ctx->server_info.sipId, from_ip, ctx->server_info.port);
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] MESSAGE From URI: %s\n", from_uri);
+    if (debug) fprintf(stderr, "[DEBUG] MESSAGE To URI: %s\n", to);
     
     const char *ct = content_type ? content_type : "application/MANSCDP+xml";
     
     osip_message_t *msg = NULL;
     eXosip_lock(ctx->ctx);
     
+    if (debug) fprintf(stderr, "[DEBUG] Building MESSAGE request...\n");
+    
     int ret = eXosip_message_build_request(ctx->ctx, &msg, "MESSAGE", to, from_uri, NULL);
-    if (ret == 0 && msg) {
-        osip_message_set_body(msg, message, strlen(message));
-        osip_message_set_content_type(msg, ct);
-        
-        int send_ret = eXosip_message_send_request(ctx->ctx, msg);
-        if (debug) fprintf(stderr, "[DEBUG] Send MESSAGE result: %d\n", send_ret);
-        
+    
+    if (debug) fprintf(stderr, "[DEBUG] eXosip_message_build_request returned: %d, msg=%p\n", ret, (void*)msg);
+    
+    if (ret != 0) {
         eXosip_unlock(ctx->ctx);
-        return send_ret > 0 ? 0 : -1;
+        fprintf(stderr, "[ERROR] Failed to build MESSAGE: eXosip error code %d\n", ret);
+        fprintf(stderr, "[ERROR] Possible reasons:\n");
+        fprintf(stderr, "  - Invalid To URI: %s\n", to);
+        fprintf(stderr, "  - Invalid From URI: %s\n", from_uri);
+        fprintf(stderr, "  - eXosip context not initialized\n");
+        return -1;
     }
     
+    if (!msg) {
+        eXosip_unlock(ctx->ctx);
+        fprintf(stderr, "[ERROR] MESSAGE object is NULL even though build returned 0\n");
+        return -1;
+    }
+    
+    // 设置消息体和 Content-Type
+    if (debug) fprintf(stderr, "[DEBUG] Setting message body (%zu bytes) and content-type: %s\n", 
+                       strlen(message), ct);
+    
+    osip_message_set_body(msg, message, strlen(message));
+    osip_message_set_content_type(msg, ct);
+    
+    // 【关键修复】如果配置使用了 0.0.0.0，Via 头会是占位符 999.999.999.999
+    // 需要手动替换为检测到的本地 IP
+    if (strlen(ctx->local_ip) > 0 && strcmp(ctx->server_info.ip, "0.0.0.0") == 0) {
+        osip_via_t *via = NULL;
+        osip_message_get_via(msg, 0, &via);
+        if (via && via->host) {
+            // 检查是否是占位符
+            if (strncmp(via->host, "999.999", 7) == 0 || strcmp(via->host, "0.0.0.0") == 0) {
+                if (debug) fprintf(stderr, "[DEBUG] Fixing Via host from %s to %s\n", 
+                                   via->host, ctx->local_ip);
+                osip_free(via->host);
+                via->host = osip_strdup(ctx->local_ip);
+            }
+        }
+        if (via && via->port) {
+            // 同样修正端口
+            if (strcmp(via->port, "99999") == 0) {
+                if (debug) fprintf(stderr, "[DEBUG] Fixing Via port from %s to %d\n", 
+                                   via->port, ctx->server_info.port);
+                osip_free(via->port);
+                char port_str[16];
+                snprintf(port_str, sizeof(port_str), "%d", ctx->server_info.port);
+                via->port = osip_strdup(port_str);
+            }
+        }
+    }
+    
+    // 打印完整的 MESSAGE（调试用）
+    if (debug) {
+        char *msg_str = NULL;
+        size_t msg_len = 0;
+        osip_message_to_str(msg, &msg_str, &msg_len);
+        if (msg_str) {
+            fprintf(stderr, "[DEBUG] ========== Complete MESSAGE ==========\n%s\n", msg_str);
+            fprintf(stderr, "[DEBUG] ======================================\n");
+            osip_free(msg_str);
+        }
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] Sending MESSAGE via eXosip_message_send_request...\n");
+    
+    int send_ret = eXosip_message_send_request(ctx->ctx, msg);
+    
+    if (debug) fprintf(stderr, "[DEBUG] eXosip_message_send_request returned: %d\n", send_ret);
+    
+    if (send_ret < 0) {
+        fprintf(stderr, "[ERROR] eXosip_message_send_request failed with code: %d\n", send_ret);
+        fprintf(stderr, "[ERROR] Possible reasons:\n");
+        fprintf(stderr, "  - Network unreachable\n");
+        fprintf(stderr, "  - No route to destination\n");
+        fprintf(stderr, "  - Socket error\n");
+        fprintf(stderr, "  - Invalid To URI format\n");
+        eXosip_unlock(ctx->ctx);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ MESSAGE sent successfully, transaction ID: %d\n", send_ret);
+    
     eXosip_unlock(ctx->ctx);
-    if (debug) fprintf(stderr, "[DEBUG] Failed to build MESSAGE: %d\n", ret);
-    return -1;
+    return 0;
 }
 
 /**

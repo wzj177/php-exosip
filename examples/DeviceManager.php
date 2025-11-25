@@ -85,6 +85,8 @@ class DeviceManager
         // 更新设备属性
         if (isset($info['uri'])) $device->uri = $info['uri'];
         if (isset($info['ip'])) $device->ip = $info['ip'];
+        if (isset($info['received_ip'])) $device->received_ip = $info['received_ip'];
+        if (isset($info['received_port'])) $device->received_port = $info['received_port'];
         if (isset($info['port'])) $device->port = $info['port'];
         if (isset($info['registered_at'])) $device->registeredAt = $info['registered_at'];
         if (isset($info['expires'])) $device->expires = $info['expires'];

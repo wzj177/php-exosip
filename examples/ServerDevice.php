@@ -10,6 +10,8 @@ class ServerDevice
     public string $deviceId;
     public string $uri;
     public string $ip;
+    public ?string $received_ip = null;
+    public ?int $received_port = null;
     public int $port;
     
     // 注册状态
@@ -40,6 +42,8 @@ class ServerDevice
         $this->deviceId = $deviceId;
         $this->uri = $data['uri'] ?? '';
         $this->ip = $data['ip'] ?? '';
+        $this->received_ip = $data['received_ip'] ?? null;
+        $this->received_port = $data['received_port'] ?? null;
         $this->port = $data['port'] ?? 0;
         $this->registeredAt = $data['registered_at'] ?? 0;
         $this->expires = $data['expires'] ?? 3600;
@@ -130,6 +134,8 @@ class ServerDevice
             'device_id' => $this->deviceId,
             'uri' => $this->uri,
             'ip' => $this->ip,
+            'received_ip' => $this->received_ip,
+            'received_port' => $this->received_port,
             'port' => $this->port,
             'registered' => $this->registered,
             'register_time' => $this->registerTime,

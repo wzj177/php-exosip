@@ -549,6 +549,7 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
 static const char* php_exosip_get_event_type_name(int event_type, osip_message_t *request);
 static zval* php_exosip_get_event_callback(php_exosip_obj *obj, const char *event_type);
 static zval php_exosip_call_event_handler(zval *callback, zval *event_obj);
+static void php_exosip_call_error_handler(php_exosip_obj *obj, const char *error_msg);
 static void php_exosip_signal_handler(int sig);
 static void php_exosip_parse_session_data(php_sip_event_obj *event_obj, zval *session_data);
 
@@ -1243,14 +1244,75 @@ PHP_METHOD(ExoSip, run) {
                         
                         if (callback) {
                             Z_TRY_ADDREF(sip_event_obj);
-                            zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
                             
-                            if (Z_TYPE(result) == IS_FALSE) {
-                                php_printf("[Worker] Server shutdown requested\n");
-                                obj->is_running = 0;
-                                obj->ctx->running = 0;
-                            }
-                            zval_ptr_dtor(&result);
+                            zend_try {
+                                // 清除之前可能残留的异常
+                                if (EG(exception)) {
+                                    zend_clear_exception();
+                                }
+                                
+                                zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
+                                
+                                // 检查是否有异常产生
+                                if (EG(exception)) {
+                                    // 获取异常信息
+                                    zval *exception = EG(exception);
+                                    char error_buffer[1024];
+                                    const char *error_msg = "Unknown error";
+                                    
+                                    if (exception && Z_TYPE_P(exception) == IS_OBJECT) {
+                                        zend_class_entry *ce = Z_OBJCE_P(exception);
+                                        
+                                        // 尝试获取异常消息
+                                        zval rv;
+                                        zval *message = zend_read_property(ce, Z_OBJ_P(exception), "message", sizeof("message")-1, 0, &rv);
+                                        
+                                        if (message && Z_TYPE_P(message) == IS_STRING && Z_STRLEN_P(message) > 0) {
+                                            snprintf(error_buffer, sizeof(error_buffer), "%s: %s", 
+                                                    ZSTR_VAL(ce->name), Z_STRVAL_P(message));
+                                            error_msg = error_buffer;
+                                        } else {
+                                            snprintf(error_buffer, sizeof(error_buffer), "%s", ZSTR_VAL(ce->name));
+                                            error_msg = error_buffer;
+                                        }
+                                        
+                                        // 如果有文件和行号信息,也包含进来
+                                        zval *file = zend_read_property(ce, Z_OBJ_P(exception), "file", sizeof("file")-1, 0, &rv);
+                                        zval *line = zend_read_property(ce, Z_OBJ_P(exception), "line", sizeof("line")-1, 0, &rv);
+                                        
+                                        if (file && Z_TYPE_P(file) == IS_STRING && line && Z_TYPE_P(line) == IS_LONG) {
+                                            char temp_buffer[1024];
+                                            snprintf(temp_buffer, sizeof(temp_buffer), "%s in %s:%ld", 
+                                                    error_buffer, Z_STRVAL_P(file), Z_LVAL_P(line));
+                                            strncpy(error_buffer, temp_buffer, sizeof(error_buffer)-1);
+                                            error_buffer[sizeof(error_buffer)-1] = '\0';
+                                        }
+                                    }
+                                    
+                                    php_printf("[Worker] Event callback error: %s\n", error_msg);
+                                    
+                                    // 调用 onError 回调
+                                    php_exosip_call_error_handler(obj, error_msg);
+                                    
+                                    zend_clear_exception();
+                                } else if (Z_TYPE(result) == IS_FALSE) {
+                                    php_printf("[Worker] Server shutdown requested\n");
+                                    obj->is_running = 0;
+                                    obj->ctx->running = 0;
+                                }
+                                
+                                if (!Z_ISUNDEF(result)) {
+                                    zval_ptr_dtor(&result);
+                                }
+                            } zend_catch {
+                                php_printf("[Worker] Event callback bailout caught, continuing...\n");
+                                // 调用 onError 回调
+                                php_exosip_call_error_handler(obj, "Fatal error in event callback");
+                                // 清除异常状态
+                                if (EG(exception)) {
+                                    zend_clear_exception();
+                                }
+                            } zend_end_try();
                         }
                         
                         zval_ptr_dtor(&sip_event_obj);
@@ -1266,16 +1328,31 @@ PHP_METHOD(ExoSip, run) {
                         zval args[0];
                         
                         zend_try {
+                            // 清除之前可能残留的异常
+                            if (EG(exception)) {
+                                zend_clear_exception();
+                            }
+                            
                             if (call_user_function(NULL, &obj->onTimer, &obj->onTimer, &result, 0, args) == SUCCESS) {
-                                if (Z_TYPE(result) == IS_FALSE) {
+                                // 检查是否有异常产生
+                                if (EG(exception)) {
+                                    php_printf("[Worker] Timer callback generated exception, clearing and continuing...\\n");
+                                    zend_clear_exception();
+                                } else if (Z_TYPE(result) == IS_FALSE) {
                                     obj->is_running = 0;
                                     obj->ctx->running = 0;
                                 }
-                                zval_ptr_dtor(&result);
+                                
+                                if (!Z_ISUNDEF(result)) {
+                                    zval_ptr_dtor(&result);
+                                }
                             }
                         } zend_catch {
-                            php_error_docref(NULL, E_WARNING, "[Worker] onTimer callback threw an exception");
-                            // 继续运行，不崩溃
+                            php_printf("[Worker] Timer callback bailout caught, continuing...\\n");
+                            // 清除异常状态
+                            if (EG(exception)) {
+                                zend_clear_exception();
+                            }
                         } zend_end_try();
                     }
                 }
@@ -1369,15 +1446,20 @@ PHP_METHOD(ExoSip, run) {
                     // 注意：回调函数会接收对象的引用，需要增加引用计数
                     Z_TRY_ADDREF(sip_event_obj);
                     
-                    zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
-                    
-                    // 检查回调返回值，false表示停止服务器
-                    if (Z_TYPE(result) == IS_FALSE) {
-                        php_printf("Server shutdown requested by event handler\n");
-                        obj->is_running = 0;
-                        obj->ctx->running = 0;
-                    }
-                    zval_ptr_dtor(&result);
+                    zend_try {
+                        zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
+                        
+                        // 检查回调返回值，false表示停止服务器
+                        if (Z_TYPE(result) == IS_FALSE) {
+                            php_printf("Server shutdown requested by event handler\n");
+                            obj->is_running = 0;
+                            obj->ctx->running = 0;
+                        }
+                        zval_ptr_dtor(&result);
+                    } zend_catch {
+                        php_error_docref(NULL, E_WARNING, "Event callback threw an exception, continuing...");
+                        // 继续运行,不崩溃
+                    } zend_end_try();
                 } else {
                     // 没有设置回调，输出调试信息（包含原始事件类型值便于调试）
                     php_printf(" Unhandled SIP event: %s (type=%d) from %s\n", 
@@ -1654,6 +1736,39 @@ static zval php_exosip_call_event_handler(zval *callback, zval *event_obj) {
     }
     
     return retval;
+}
+
+/* Call error handler callback */
+static void php_exosip_call_error_handler(php_exosip_obj *obj, const char *error_msg) {
+    if (Z_ISNULL(obj->onError)) {
+        return;
+    }
+    
+    if (!zend_is_callable(&obj->onError, 0, NULL)) {
+        return;
+    }
+    
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    
+    if (zend_fcall_info_init(&obj->onError, 0, &fci, &fcc, NULL, NULL) == SUCCESS) {
+        zval params[1];
+        zval retval;
+        
+        ZVAL_STRING(&params[0], error_msg);
+        ZVAL_NULL(&retval);
+        
+        fci.retval = &retval;
+        fci.param_count = 1;
+        fci.params = params;
+        
+        zend_call_function(&fci, &fcc);
+        
+        zval_ptr_dtor(&params[0]);
+        if (!Z_ISUNDEF(retval)) {
+            zval_ptr_dtor(&retval);
+        }
+    }
 }
 
 /* Signal handler for graceful shutdown (multi-instance support) */

@@ -6,6 +6,7 @@
  */
 
 require_once __DIR__ . '/protocol/GB28181Handler.php';
+require_once __DIR__ . '/protocol/CallbackWrapper.php';
 require_once __DIR__ . '/DeviceManager.php';
 
 // 初始化SIP服务器
@@ -26,7 +27,7 @@ $sipServer = new ExoSip([
     'pid_file' => '/tmp/gb28181_server.pid',
     
     // Master-Worker-Task 多进程配置
-    'task_worker_num' => 4,
+    'task_worker_num' => 1,
     
     // 定时器配置（单位：毫秒）
     'timer_interval' => 30000,  // 30秒检查一次设备超时
@@ -38,7 +39,7 @@ $gb28181 = new GB28181Handler($sipServer, [
     'server_domain' => $sipRealm,
     'heartbeat_timeout' => 180,
     'register_expires' => 3600,
-    'catalog_auto_query' => false,
+    'catalog_auto_query' => true,
     'debug' => true,
 ]);
 // 绑定GB28181事件处理器

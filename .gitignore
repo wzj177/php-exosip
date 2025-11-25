@@ -51,7 +51,8 @@ get_crash_stack.sh
 # ============================================
 # 示例和文档（保留必要的）
 # ============================================
-# 隐藏大型示例项目
+
+docs/GB28181-Service/
 examples/GB28181-Service/
 examples/webrtc-demo/
 examples/protocol/
