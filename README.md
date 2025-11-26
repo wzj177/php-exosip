@@ -800,6 +800,42 @@ MIT License
 
 ## 更新日志
 
+### v2.3.0 (2025-01-25) 🚀
+
+**长期任务支持 (Long Task):**
+
+#### ✅ onWorkerStart 回调
+- Worker 进程启动时触发
+- 用于初始化资源、启动长期任务
+
+#### ✅ startLongTask() 方法
+- 创建专用的长期任务进程
+- 允许永久阻塞(Redis::subscribe、Kafka consume 等)
+- 不占用普通 Task 进程池
+- 通过 sendToWorker() 推送消息给 Worker
+
+**典型应用场景:**
+- ✅ Redis PubSub 订阅 (真正的 subscribe,不是 blPop!)
+- ✅ Kafka 消费者 (长连接消费)
+- ✅ RabbitMQ 消费者 (队列监听)
+- ✅ WebSocket 长连接
+- ✅ 任何需要永久阻塞的场景
+
+**架构优势:**
+```
+Worker (SIP 事件) + Task Pool (短期任务) + Long Task (订阅/队列)
+         ↕                    ↕                        ↕
+   不阻塞,实时         DB/HTTP/API         Redis/Kafka/MQ
+                                          (永久阻塞 OK!)
+```
+
+**文档和示例:**
+- 📖 [Long Task 完整文档](docs/LONG_TASK_SUPPORT.md)
+- 🧪 [Redis 订阅示例](examples/test_redis_subscriber.php)
+- 📝 [API 文档](docs/exosip.stub.php)
+
+---
+
 ### v2.2.0 (2024-11-25) 🎉
 
 **三大核心功能完成:**

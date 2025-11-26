@@ -83,6 +83,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendtoworker, 0, 0, 1)
     ZEND_ARG_INFO(0, data)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_startlongtask, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getprocessstatus, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
@@ -537,6 +541,7 @@ typedef struct _php_exosip_obj {
     zval onTimer;        // 定时器回调
     
     /* Master-Worker-Task Support */
+    zval onWorkerStart;  // Worker 进程启动回调
     zval onTask;         // Task 进程回调
     zval onTaskFinish;   // Task 完成回调（Worker 进程）
     zval onPipeMessage;  // Pipe 消息回调（Task→Worker主动推送）
@@ -653,6 +658,7 @@ static void php_exosip_free_obj(zend_object *object) {
         SAFE_ZVAL_DTOR(obj->onTimer);
         
         /* Master-Worker-Task */
+        SAFE_ZVAL_DTOR(obj->onWorkerStart);
         SAFE_ZVAL_DTOR(obj->onTask);
         SAFE_ZVAL_DTOR(obj->onTaskFinish);
         SAFE_ZVAL_DTOR(obj->onPipeMessage);
@@ -710,6 +716,7 @@ static zval *exosip_read_property(zend_object *object, zend_string *member, int 
     if (strcmp(prop_name, "onTimer") == 0) return &obj->onTimer;
     
     /* Master-Worker-Task */
+    if (strcmp(prop_name, "onWorkerStart") == 0) return &obj->onWorkerStart;
     if (strcmp(prop_name, "onTask") == 0) return &obj->onTask;
     if (strcmp(prop_name, "onTaskFinish") == 0) return &obj->onTaskFinish;
     if (strcmp(prop_name, "onPipeMessage") == 0) return &obj->onPipeMessage;
@@ -762,6 +769,7 @@ static zval *exosip_write_property(zend_object *object, zend_string *member, zva
     }
     
     /* Master-Worker-Task */
+    if (strcmp(prop_name, "onWorkerStart") == 0) { ZVAL_COPY(&obj->onWorkerStart, value); return &obj->onWorkerStart; }
     if (strcmp(prop_name, "onTask") == 0) { ZVAL_COPY(&obj->onTask, value); return &obj->onTask; }
     if (strcmp(prop_name, "onTaskFinish") == 0) { ZVAL_COPY(&obj->onTaskFinish, value); return &obj->onTaskFinish; }
     if (strcmp(prop_name, "onPipeMessage") == 0) { ZVAL_COPY(&obj->onPipeMessage, value); return &obj->onPipeMessage; }
@@ -801,6 +809,7 @@ static zend_object *php_exosip_create_object(zend_class_entry *ce) {
     ZVAL_UNDEF(&obj->onConnect);
     ZVAL_UNDEF(&obj->onClose);
     ZVAL_UNDEF(&obj->onTimer);  // 定时器回调
+    ZVAL_UNDEF(&obj->onWorkerStart);  // Worker启动回调
     ZVAL_UNDEF(&obj->onTask);
     ZVAL_UNDEF(&obj->onTaskFinish);
     ZVAL_UNDEF(&obj->onPipeMessage);
@@ -1223,6 +1232,26 @@ PHP_METHOD(ExoSip, run) {
             obj->is_running = 1;
             
             php_exosip_register_instance(obj);
+            
+            // ✅ 触发 onWorkerStart 回调
+            if (!Z_ISUNDEF(obj->onWorkerStart) && Z_TYPE(obj->onWorkerStart) == IS_OBJECT) {
+                php_printf("[Worker] Calling onWorkerStart callback\n");
+                
+                zend_try {
+                    zval result;
+                    zval params[1];
+                    ZVAL_OBJ(&params[0], Z_OBJ_P(getThis()));
+                    Z_ADDREF(params[0]);
+                    
+                    if (call_user_function(EG(function_table), NULL, &obj->onWorkerStart, &result, 1, params) == SUCCESS) {
+                        zval_ptr_dtor(&result);
+                    }
+                    
+                    zval_ptr_dtor(&params[0]);
+                } zend_catch {
+                    php_error_docref(NULL, E_WARNING, "[Worker] onWorkerStart callback threw exception");
+                } zend_end_try();
+            }
             
             while (obj->ctx->running && obj->is_running) {
                 // Get SIP events (non-blocking, 100ms timeout)
@@ -2156,6 +2185,98 @@ PHP_METHOD(ExoSip, sendToWorker) {
     RETURN_TRUE;
 }
 
+/* ========== ExoSip::startLongTask(callable $callback) ========== */
+/**
+ * 启动一个长期运行的Task进程
+ * 这个Task允许永久阻塞(如Redis订阅),不占用常规Task池
+ * 只能在Worker进程的onWorkerStart回调中调用
+ * 
+ * @param callable $callback 回调函数,在独立Task进程中执行
+ * @return bool 成功返回true,失败返回false
+ */
+PHP_METHOD(ExoSip, startLongTask) {
+    zval *callback;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(callback)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "ExoSip not initialized");
+        RETURN_FALSE;
+    }
+    
+    if (!obj->ctx->is_worker) {
+        php_error_docref(NULL, E_WARNING, "startLongTask can only be called from Worker process");
+        RETURN_FALSE;
+    }
+    
+    if (!zend_is_callable(callback, 0, NULL)) {
+        php_error_docref(NULL, E_WARNING, "Parameter must be a valid callback");
+        RETURN_FALSE;
+    }
+    
+    // 创建socketpair用于Task→Worker通信
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == -1) {
+        php_error_docref(NULL, E_WARNING, "socketpair failed: %s", strerror(errno));
+        RETURN_FALSE;
+    }
+    
+    pid_t pid = fork();
+    
+    if (pid < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        php_error_docref(NULL, E_WARNING, "fork failed: %s", strerror(errno));
+        RETURN_FALSE;
+    }
+    
+    if (pid == 0) {
+        // 子进程(Long Task)
+        close(sv[0]); // 关闭Worker端
+        
+        obj->ctx->is_master = 0;
+        obj->ctx->is_worker = 0;
+        obj->ctx->is_task = 1;
+        obj->ctx->task_sockfd = sv[1];
+        
+        php_printf("[LongTask] Started PID=%d, fd=%d\n", getpid(), sv[1]);
+        
+        // 调用用户回调
+        zval result;
+        zval params[1];
+        ZVAL_OBJ(&params[0], Z_OBJ_P(getThis()));
+        Z_ADDREF(params[0]);
+        
+        zend_try {
+            if (call_user_function(EG(function_table), NULL, callback, &result, 1, params) == SUCCESS) {
+                zval_ptr_dtor(&result);
+            }
+        } zend_catch {
+            php_error_docref(NULL, E_WARNING, "[LongTask] Callback threw exception");
+        } zend_end_try();
+        
+        zval_ptr_dtor(&params[0]);
+        close(sv[1]);
+        
+        // Long Task结束后退出进程
+        _exit(0);
+    }
+    
+    // Worker进程
+    close(sv[1]); // 关闭Task端
+    
+    // 将Task的fd加入Worker的监听
+    // TODO: 可以保存pid和fd,用于管理Long Task
+    
+    php_printf("[Worker] Long Task started: PID=%d, fd=%d\n", pid, sv[0]);
+    
+    RETURN_TRUE;
+}
+
 /* ========== ExoSip::getProcessStatus() ========== */
 PHP_METHOD(ExoSip, getProcessStatus) {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -2213,6 +2334,7 @@ const zend_function_entry exosip_methods[] = {
     /* Master-Worker-Task */
     PHP_ME(ExoSip, addTask, arginfo_exosip_addtask, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendToWorker, arginfo_exosip_sendtoworker, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, startLongTask, arginfo_exosip_startlongtask, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getProcessStatus, arginfo_exosip_getprocessstatus, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getRunStatus, arginfo_exosip_getrunstatus, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     

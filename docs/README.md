@@ -4,6 +4,14 @@
 
 ## 📚 核心架构文档
 
+### [LONG_TASK_SUPPORT.md](LONG_TASK_SUPPORT.md) 🆕 ⭐️
+长期任务支持文档 (v2.3.0)
+- onWorkerStart 回调说明
+- startLongTask() 方法详解
+- Redis/Kafka/RabbitMQ 订阅示例
+- Laravel 集成完整流程
+- 架构图和时间线分析
+
 ### [MASTER_WORKER_TASK.md](MASTER_WORKER_TASK.md) ⭐️
 Master-Worker-Task 多进程架构完整说明
 - 架构设计原理

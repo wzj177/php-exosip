@@ -255,6 +255,33 @@ class ExoSip {
     public $onPipeMessage;
     
     /**
+     * Worker start handler - Called when Worker process starts
+     * Ideal for initializing resources, starting long-running tasks, etc.
+     * @var callable(ExoSip $server): void
+     * 
+     * @example
+     * ```php
+     * $sip->onWorkerStart = function($server) {
+     *     echo "Worker started, PID: " . posix_getpid() . "\n";
+     *     
+     *     // Start long-running subscriber task (e.g., Redis subscribe)
+     *     $server->startLongTask(function($server) {
+     *         $redis = new Redis();
+     *         $redis->pconnect('127.0.0.1', 6379);
+     *         
+     *         // This will block forever - that's OK in a long task!
+     *         $redis->subscribe(['gb28181:commands'], function($redis, $channel, $msg) use ($server) {
+     *             $data = json_decode($msg, true);
+     *             // Forward to Worker
+     *             $server->sendToWorker(['type' => 'redis_cmd', 'data' => $data]);
+     *         });
+     *     });
+     * };
+     * ```
+     */
+    public $onWorkerStart;
+    
+    /**
      * Create and optionally initialize SIP server
      * 
      * @param array|null $config Optional configuration:
@@ -561,6 +588,82 @@ class ExoSip {
      * ```
      */
     public function sendToWorker($data): bool {}
+    
+    /**
+     * Start a long-running task (Worker process only, called from onWorkerStart)
+     * 
+     * Creates a dedicated task process that is allowed to block indefinitely.
+     * Unlike normal tasks (addTask), long tasks can run forever without blocking
+     * the regular task pool. Perfect for Redis subscriptions, message queues, etc.
+     * 
+     * Key features:
+     * - Runs in a separate dedicated process
+     * - Can block forever (e.g., Redis::subscribe)
+     * - Can use sendToWorker() to push messages to Worker
+     * - Does NOT affect normal task processing
+     * - Should only be called from onWorkerStart callback
+     * 
+     * @param callable $callback Task function to execute
+     * @return bool True on success, false on failure
+     * @throws Exception If called outside onWorkerStart
+     * 
+     * @example
+     * ```php
+     * // Redis subscriber example
+     * $sip->onWorkerStart = function($server) {
+     *     $server->startLongTask(function($server) {
+     *         $redis = new Redis();
+     *         $redis->pconnect('127.0.0.1', 6379);
+     *         
+     *         // This blocks forever - that's OK!
+     *         $redis->subscribe(['gb28181:commands'], function($redis, $channel, $message) use ($server) {
+     *             $data = json_decode($message, true);
+     *             
+     *             // Forward to Worker for processing
+     *             $server->sendToWorker([
+     *                 'type' => 'redis_command',
+     *                 'data' => $data
+     *             ]);
+     *         });
+     *     });
+     * };
+     * 
+     * // Worker receives messages via onPipeMessage
+     * $sip->onPipeMessage = function($server, $message) {
+     *     if ($message['type'] === 'redis_command') {
+     *         $data = $message['data'];
+     *         
+     *         // Handle command (SIP operations, etc.)
+     *         if ($data['type'] === 'ptz_control') {
+     *             sendPtzCommand($data['device_id'], $data['command']);
+     *         }
+     *     }
+     * };
+     * ```
+     * 
+     * @example
+     * ```php
+     * // Kafka consumer example
+     * $sip->onWorkerStart = function($server) {
+     *     $server->startLongTask(function($server) {
+     *         $consumer = new RdKafka\Consumer();
+     *         $consumer->subscribe(['device-events']);
+     *         
+     *         while (true) {
+     *             $message = $consumer->consume(120 * 1000); // Blocks
+     *             
+     *             if ($message->err === RD_KAFKA_RESP_ERR_NO_ERROR) {
+     *                 $server->sendToWorker([
+     *                     'type' => 'kafka_message',
+     *                     'data' => json_decode($message->payload, true)
+     *                 ]);
+     *             }
+     *         }
+     *     });
+     * };
+     * ```
+     */
+    public function startLongTask(callable $callback): bool {}
     
     /**
      * Get process status (internal call, from running process)
