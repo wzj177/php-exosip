@@ -196,6 +196,13 @@ typedef struct _sip_statistics {
 // 原因：单线程事件循环 + eXosip_lock/unlock 足够高效
 // 性能：即使1000设备并发，每次加锁仅1ms，总延迟<1秒
 
+// Debug 日志宏
+#define DEBUG_LOG(ctx, ...) do { \
+    if (ctx && ctx->server_info.debug) { \
+        fprintf(stderr, __VA_ARGS__); \
+    } \
+} while(0)
+
 // SIP上下文结构（完整版）
 typedef struct _sip_context {
     struct eXosip_t *ctx;
@@ -234,15 +241,21 @@ typedef struct _sip_context {
     // Master-Worker-Task 进程管理
     pid_t master_pid;
     pid_t worker_pid;
+    int worker_sockfd;          // Master-Worker socketpair (Master侧)
     pid_t *task_pids;
     int task_count;
     int *task_sockfds;
+    pid_t *long_task_pids;      // Long Task PIDs (预分配槽位)
+    int *long_task_sockfds;     // Long Task socketpair 数组
+    int long_task_count;        // Long Task 槽位数量
+    zval *long_task_callbacks;  // Long Task 回调数组 (Worker 设置)
     char pid_file[256];         // PID 文件路径
     
     // 进程状态标识
     int is_master;
     int is_worker;
     int is_task;
+    int is_long_task;  // Long Task 进程标志
     int task_worker_id;
     
     // 任务统计
@@ -436,6 +449,8 @@ int sip_start_master_process(SipContext *ctx);
 void sip_master_loop(SipContext *ctx);
 int sip_fork_worker(SipContext *ctx);
 int sip_fork_task_workers(SipContext *ctx);
+int sip_fork_long_task_workers(SipContext *ctx);
+void sip_long_task_loop(SipContext *ctx, int sockfd);
 void sip_worker_loop(SipContext *ctx);
 void sip_task_loop(SipContext *ctx, int worker_id);
 unsigned long sip_add_task(SipContext *ctx, const char *serialized_data, size_t data_len);

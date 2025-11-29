@@ -71,6 +71,10 @@ SipContext* sip_init(ServerInfo *info) {
     ctx->task_pids = NULL;
     ctx->task_sockfds = NULL;
     ctx->task_count = 0;
+    ctx->long_task_pids = NULL;
+    ctx->long_task_sockfds = NULL;
+    ctx->long_task_count = 0;
+    ctx->long_task_callbacks = NULL;
     ctx->is_master = 0;
     ctx->is_worker = 0;
     ctx->is_task = 0;
@@ -982,7 +986,7 @@ void handle_sip_event(SipContext *ctx, eXosip_event_t *evt) {
     
     ctx->stats.total_messages++;
     
-    // ✅ C层不再处理具体业务逻辑
+    // C层不再处理具体业务逻辑
     // 所有事件都通过通用事件回调转发给PHP层
     // PHP层根据事件类型和method字段自行处理
     
@@ -2670,22 +2674,54 @@ int sip_start_master_process(SipContext *ctx) {
     
     fprintf(stderr, "[Master] Started PID=%d\n", ctx->master_pid);
     
-    // Fork Worker 和 Task
+    // 先 fork Task workers（属于 Master，用于异步任务）
+    fprintf(stderr, "[Master] Forking %d Task workers...\n", ctx->task_count);
+    if (sip_fork_task_workers(ctx) < 0) {
+        fprintf(stderr, "[Master] ERROR: sip_fork_task_workers failed!\n");
+        return -1;
+    }
+    fprintf(stderr, "[Master] Task workers forked successfully\n");
+    
+    // Fork Worker
     if (sip_fork_worker(ctx) < 0) {
         return -1;
     }
     
-    if (sip_fork_task_workers(ctx) < 0) {
-        return -1;
+    // Worker 进程：分配 Long Task 数组（但不预先 fork）
+    if (ctx->is_worker) {
+        if (ctx->long_task_count > 0) {
+            fprintf(stderr, "[Worker] Allocating space for %d Long Task worker(s)...\n", ctx->long_task_count);
+            
+            // 分配数组
+            ctx->long_task_pids = (pid_t*)calloc(ctx->long_task_count, sizeof(pid_t));
+            ctx->long_task_sockfds = (int*)calloc(ctx->long_task_count, sizeof(int));
+            
+            if (!ctx->long_task_pids || !ctx->long_task_sockfds) {
+                fprintf(stderr, "[Worker] ERROR: Failed to allocate Long Task arrays\n");
+                _exit(1);
+            }
+            
+            // 初始化为空闲状态
+            for (int i = 0; i < ctx->long_task_count; i++) {
+                ctx->long_task_pids[i] = 0;      // 0 = 空闲槽位
+                ctx->long_task_sockfds[i] = -1;
+            }
+            
+            fprintf(stderr, "[Worker] Long Task slots prepared (will fork on-demand)\n");
+        }
+        return 0;
     }
     
-    // ✅ 只保存 Master PID（标准做法）
+    // 保存 Master PID 和进程配置信息（用于状态查询）
     if (strlen(ctx->pid_file) > 0) {
         FILE *fp = fopen(ctx->pid_file, "w");
         if (fp) {
             fprintf(fp, "%d\n", ctx->master_pid);
+            fprintf(fp, "%d\n", ctx->task_count);      // Task 进程数量
+            fprintf(fp, "%d\n", ctx->long_task_count); // Long Task 进程数量（由 Worker 管理）
             fclose(fp);
-            fprintf(stderr, "[Master] PID file saved: %s (PID=%d)\n", ctx->pid_file, ctx->master_pid);
+            fprintf(stderr, "[Master] PID file saved: %s (PID=%d, Tasks=%d, LongTasks=%d)\n",
+                    ctx->pid_file, ctx->master_pid, ctx->task_count, ctx->long_task_count);
         } else {
             fprintf(stderr, "[Master] Failed to write PID file: %s\n", ctx->pid_file);
         }
@@ -2749,13 +2785,23 @@ int sip_fork_task_workers(SipContext *ctx) {
         
         if (pid == 0) {
             close(sv[0]);
+            
+            // 关闭之前创建的 Task socketpairs（避免 fd 泄漏）
+            for (int j = 0; j < i; j++) {
+                if (ctx->task_sockfds[j] >= 0) {
+                    close(ctx->task_sockfds[j]);
+                }
+            }
+            
+            // 注意：eXosip socket 无法获取 fd，依赖 OS 在进程退出时回收
+            
             ctx->is_master = 0;
             ctx->is_worker = 0;
             ctx->is_task = 1;
             ctx->task_worker_id = i;
-            ctx->task_sockfd = sv[1];  // 保存Task进程的socketpair fd
+            ctx->task_sockfd = sv[1];
             
-            fprintf(stderr, "[Task-%d] Started PID=%d\n", i, getpid());
+            fprintf(stderr, "[Task-%d] Started PID=%d (cleaned inherited fds)\n", i, getpid());
             sip_task_loop(ctx, sv[1]);
             close(sv[1]);
             _exit(0);
@@ -2769,6 +2815,108 @@ int sip_fork_task_workers(SipContext *ctx) {
         fcntl(sv[0], F_SETFL, flags | O_NONBLOCK);
     }
     
+    return 0;
+}
+
+int sip_fork_long_task_workers(SipContext *ctx) {
+    fprintf(stderr, "[DEBUG] sip_fork_long_task_workers: long_task_count=%d, is_worker=%d\n", 
+            ctx->long_task_count, ctx->is_worker);
+    
+    if (ctx->long_task_count <= 0) {
+        fprintf(stderr, "[DEBUG] No Long Task workers configured, skipping\n");
+        return 0;
+    }
+    
+    // 为 Worker 进程分配 Long Task 数组（如果还未分配）
+    if (!ctx->long_task_pids || !ctx->long_task_sockfds) {
+        ctx->long_task_pids = (pid_t*)calloc(ctx->long_task_count, sizeof(pid_t));
+        ctx->long_task_sockfds = (int*)calloc(ctx->long_task_count, sizeof(int));
+        
+        if (!ctx->long_task_pids || !ctx->long_task_sockfds) {
+            fprintf(stderr, "[ERROR] Failed to allocate Long Task arrays\n");
+            return -1;
+        }
+        
+        for (int i = 0; i < ctx->long_task_count; i++) {
+            ctx->long_task_pids[i] = 0;
+            ctx->long_task_sockfds[i] = -1;
+        }
+        
+        fprintf(stderr, "[DEBUG] Allocated Long Task arrays: pids=%p, sockfds=%p\n",
+                (void*)ctx->long_task_pids, (void*)ctx->long_task_sockfds);
+    }
+    
+    for (int i = 0; i < ctx->long_task_count; i++) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == -1) {
+            perror("[Master] socketpair failed for Long Task");
+            return -1;
+        }
+        
+        pid_t pid = fork();
+        
+        if (pid < 0) {
+            perror("[Master] fork long task failed");
+            close(sv[0]);
+            close(sv[1]);
+            return -1;
+        }
+        
+        if (pid == 0) {
+            // Long Task 子进程
+            close(sv[0]);
+            
+            // 关闭所有继承的 fd（避免泄漏）
+            // 1. 关闭 Worker-Task socketpairs
+            if (ctx->task_sockfds) {
+                for (int j = 0; j < ctx->task_count; j++) {
+                    if (ctx->task_sockfds[j] >= 0) {
+                        close(ctx->task_sockfds[j]);
+                    }
+                }
+            }
+            
+            // 2. 关闭之前创建的 Long Task socketpairs
+            if (ctx->long_task_sockfds) {
+                for (int j = 0; j < i; j++) {
+                    if (ctx->long_task_sockfds[j] >= 0) {
+                        close(ctx->long_task_sockfds[j]);
+                    }
+                }
+            }
+            
+            // 3. 关闭 eXosip（Long Task 不需要处理 SIP）
+            if (ctx->ctx) {
+                eXosip_quit(ctx->ctx);
+                ctx->ctx = NULL;
+            }
+            
+            ctx->is_master = 0;
+            ctx->is_worker = 0;
+            ctx->is_task = 1;
+            ctx->task_worker_id = i;
+            ctx->task_sockfd = sv[1];
+            
+            fprintf(stderr, "[LongTask-%d] Started PID=%d (cleaned inherited fds)\n", i, getpid());
+            
+            // 进入休眠等待循环
+            sip_long_task_loop(ctx, sv[1]);
+            
+            close(sv[1]);
+            _exit(0);
+        }
+        
+        // Worker/Master 父进程
+        close(sv[1]);
+        ctx->long_task_pids[i] = pid;
+        ctx->long_task_sockfds[i] = sv[0];
+        
+        int flags = fcntl(sv[0], F_GETFL, 0);
+        fcntl(sv[0], F_SETFL, flags | O_NONBLOCK);
+    }
+    
+    const char *prefix = ctx->is_worker ? "Worker" : "Master";
+    fprintf(stderr, "[%s] Forked %d Long Task worker(s)\n", prefix, ctx->long_task_count);
     return 0;
 }
 
@@ -2793,28 +2941,52 @@ void sip_master_loop(SipContext *ctx) {
     
     fprintf(stderr, "[Master] Shutting down\n");
     
+    // 先通知 Worker（Worker 会清理自己的 Long Task 进程）
     if (ctx->worker_pid > 0) {
         kill(ctx->worker_pid, SIGTERM);
     }
     
+    // 清理 Task 进程
     for (int i = 0; i < ctx->task_count; i++) {
         if (ctx->task_pids[i] > 0) {
             kill(ctx->task_pids[i], SIGTERM);
         }
     }
     
+    // 不清理 Long Task（由 Worker 负责）
+    // Long Task 是 Worker 的子进程，Master 不应该管理
+    
+    // 等待子进程优雅退出
     sleep(2);
     
-    if (ctx->worker_pid > 0) kill(ctx->worker_pid, SIGKILL);
-    for (int i = 0; i < ctx->task_count; i++) {
-        if (ctx->task_pids[i] > 0) kill(ctx->task_pids[i], SIGKILL);
+    // 强制清理未退出的进程
+    if (ctx->worker_pid > 0) {
+        kill(ctx->worker_pid, SIGKILL);
     }
     
-    // ✅ 删除 PID 文件
+    for (int i = 0; i < ctx->task_count; i++) {
+        if (ctx->task_pids[i] > 0) {
+            kill(ctx->task_pids[i], SIGKILL);
+        }
+    }
+    
+    // 回收所有子进程（防止僵尸进程）
+    int status;
+    while (waitpid(-1, &status, WNOHANG) > 0) {
+        // 回收所有已退出的子进程
+    }
+    
+    // 删除 PID 文件
     if (strlen(ctx->pid_file) > 0) {
         if (unlink(ctx->pid_file) == 0) {
             fprintf(stderr, "[Master] PID file deleted: %s\n", ctx->pid_file);
         }
+    }
+    
+    // 释放 Long Task 内存
+    if (ctx->long_task_pids) {
+        free(ctx->long_task_pids);
+        ctx->long_task_pids = NULL;
     }
     
     fprintf(stderr, "[Master] Shutdown complete\n");
@@ -2838,8 +3010,20 @@ void sip_worker_loop(SipContext *ctx) {
             sip_check_and_fire_timer(ctx);
         }
         
+        // 检查普通 Task 进程的结果
         for (int i = 0; i < ctx->task_count; i++) {
             sip_handle_task_result(ctx, ctx->task_sockfds[i]);
+        }
+        
+        // 检查 Long Task 进程的消息（sendToWorker 推送）
+        for (int i = 0; i < ctx->long_task_count; i++) {
+            if (ctx->long_task_sockfds[i] >= 0) {
+                if (ctx->server_info.debug) {
+                    fprintf(stderr, "[Worker] Checking Long Task slot %d, sockfd=%d\n", 
+                            i, ctx->long_task_sockfds[i]);
+                }
+                sip_handle_task_result(ctx, ctx->long_task_sockfds[i]);
+            }
         }
     }
     
@@ -2943,6 +3127,100 @@ void sip_task_loop(SipContext *ctx, int sockfd) {
     fprintf(stderr, "[Task-%d] Exiting\n", ctx->task_worker_id);
 }
 
+void sip_long_task_loop(SipContext *ctx, int sockfd) {
+    signal(SIGTERM, sigterm_handler);
+    signal(SIGINT, sigterm_handler);
+    
+    fprintf(stderr, "[LongTask-%d] Waiting for callback from Worker...\n", ctx->task_worker_id);
+    
+    // 阻塞等待 Worker 发送回调数据
+    task_msg_t msg_hdr;
+    ssize_t n = read(sockfd, &msg_hdr, sizeof(msg_hdr));
+    
+    if (n != sizeof(msg_hdr)) {
+        fprintf(stderr, "[LongTask-%d] Failed to receive callback header (n=%zd)\n", ctx->task_worker_id, n);
+        return;
+    }
+    
+    if (msg_hdr.data_len == 0) {
+        fprintf(stderr, "[LongTask-%d] Received empty callback\n", ctx->task_worker_id);
+        return;
+    }
+    
+    // 读取序列化的回调数据
+    char *data = (char*)malloc(msg_hdr.data_len);
+    if (!data) {
+        fprintf(stderr, "[LongTask-%d] Failed to allocate memory for callback\n", ctx->task_worker_id);
+        return;
+    }
+    
+    ssize_t received = read(sockfd, data, msg_hdr.data_len);
+    if (received != (ssize_t)msg_hdr.data_len) {
+        fprintf(stderr, "[LongTask-%d] Failed to receive callback data (expected %zu, got %zd)\n", 
+               ctx->task_worker_id, msg_hdr.data_len, received);
+        free(data);
+        return;
+    }
+    
+    fprintf(stderr, "[LongTask-%d] Received callback (%zu bytes), executing...\n", 
+           ctx->task_worker_id, msg_hdr.data_len);
+    
+    // 反序列化并执行回调
+    zval callback;
+    php_unserialize_data_t var_hash;
+    PHP_VAR_UNSERIALIZE_INIT(var_hash);
+    
+    const unsigned char *p = (const unsigned char *)data;
+    if (!php_var_unserialize(&callback, &p, p + msg_hdr.data_len, &var_hash)) {
+        fprintf(stderr, "[LongTask-%d] Failed to unserialize callback\n", ctx->task_worker_id);
+        PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+        free(data);
+        return;
+    }
+    
+    PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+    free(data);
+    
+    if (!zend_is_callable(&callback, 0, NULL)) {
+        fprintf(stderr, "[LongTask-%d] Callback is not callable\n", ctx->task_worker_id);
+        zval_ptr_dtor(&callback);
+        return;
+    }
+    
+    // 执行回调（不需要传递 $server 参数）
+    // 回调应该通过闭包捕获 $server: function() use ($server) { ... }
+    // 这样 sendToWorker() 可以直接工作（ctx->is_task 已设置）
+    
+    fprintf(stderr, "[LongTask-%d] Executing callback (may block indefinitely)...\n", ctx->task_worker_id);
+    
+    zval retval;
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    
+    if (zend_fcall_info_init(&callback, 0, &fci, &fcc, NULL, NULL) == SUCCESS) {
+        fci.retval = &retval;
+        fci.param_count = 0;
+        fci.params = NULL;
+        
+        zend_try {
+            // 执行回调（可能永久阻塞在 Redis::subscribe 等）
+            if (zend_call_function(&fci, &fcc) == SUCCESS) {
+                zval_ptr_dtor(&retval);
+            } else {
+                fprintf(stderr, "[LongTask-%d] Failed to call callback\n", ctx->task_worker_id);
+            }
+        } zend_catch {
+            fprintf(stderr, "[LongTask-%d] Callback threw fatal error\n", ctx->task_worker_id);
+        } zend_end_try();
+    } else {
+        fprintf(stderr, "[LongTask-%d] Failed to initialize callback\n", ctx->task_worker_id);
+    }
+    
+    zval_ptr_dtor(&callback);
+    
+    fprintf(stderr, "[LongTask-%d] Callback finished (unexpected - should block forever)\n", ctx->task_worker_id);
+}
+
 unsigned long sip_add_task(SipContext *ctx, const char *serialized_data, size_t data_len) {
     if (!ctx || !ctx->is_worker || !serialized_data) {
         return 0;
@@ -2979,7 +3257,19 @@ void sip_handle_task_result(SipContext *ctx, int sockfd) {
     ssize_t n = read(sockfd, &result_hdr, sizeof(result_hdr));
     
     if (n != sizeof(result_hdr)) {
+        // 调试：没有数据可读（正常情况）
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            fprintf(stderr, "[Worker] read() error on sockfd=%d: %s\n", sockfd, strerror(errno));
+        } else if (n > 0 && n < sizeof(result_hdr)) {
+            fprintf(stderr, "[Worker] Partial read on sockfd=%d: got %zd bytes, expected %zu\n", 
+                    sockfd, n, sizeof(result_hdr));
+        }
         return;
+    }
+    
+    // 调试：成功读取到消息
+    if (ctx->server_info.debug) {
+        fprintf(stderr, "[Worker] Read message: type=%d, len=%zu\n", result_hdr.type, result_hdr.result_len);
     }
     
     char *result_data = NULL;
@@ -3169,6 +3459,30 @@ void sip_get_process_status(SipContext *ctx, zval *status_array) {
         add_assoc_long(status_array, "tasks_posted", ctx->tasks_posted);
         add_assoc_long(status_array, "tasks_failed", ctx->tasks_failed);
     }
+    
+    // Long Task 进程池信息
+    if (ctx->long_task_count > 0 && ctx->long_task_pids) {
+        zval long_tasks_array;
+        array_init(&long_tasks_array);
+        
+        for (int i = 0; i < ctx->long_task_count; i++) {
+            if (ctx->long_task_pids[i] > 0) {
+                zval long_task_info;
+                array_init(&long_task_info);
+                
+                add_assoc_long(&long_task_info, "id", i);
+                add_assoc_long(&long_task_info, "pid", ctx->long_task_pids[i]);
+                
+                // 检查进程是否存在
+                int long_task_alive = (kill(ctx->long_task_pids[i], 0) == 0);
+                add_assoc_string(&long_task_info, "status", long_task_alive ? "running" : "dead");
+                
+                add_next_index_zval(&long_tasks_array, &long_task_info);
+            }
+        }
+        
+        add_assoc_zval(status_array, "long_tasks", &long_tasks_array);
+    }
 }
 
 /**
@@ -3196,14 +3510,22 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
     array_init(status_array);
     
     pid_t master_pid = 0;
+    int task_count = 0;
+    int long_task_count = 0;
     char cmd[512];  // 声明 cmd 缓冲区
     
-    // 只读取 Master PID
+    // 读取 Master PID 和进程配置
     if (fscanf(fp, "%d", &master_pid) != 1) {
         fclose(fp);
         return -1;
     }
+    // 尝试读取 task_count 和 long_task_count（兼容旧版本）
+    fscanf(fp, "%d", &task_count);
+    fscanf(fp, "%d", &long_task_count);
     fclose(fp);
+    
+    fprintf(stderr, "[DEBUG] Read from PID file: master=%d, tasks=%d, long_tasks=%d\n",
+            master_pid, task_count, long_task_count);
     
     // 检查 Master 进程是否存在
     if (kill(master_pid, 0) != 0) {
@@ -3337,35 +3659,66 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
             add_assoc_zval(status_array, "worker", &worker_info);
         }
         
-        // 其余子进程是 Task
+        // 根据 PID 文件中的配置信息正确区分 Task 和 Long Task
+        // fork 顺序：Worker (child_pids[0]) → Tasks → Long Tasks
+        
         if (child_count > 1) {
             zval tasks_array;
             array_init(&tasks_array);
             
+            zval long_tasks_array;
+            array_init(&long_tasks_array);
+            
+            // 子进程分布：
+            // child_pids[0] = Worker
+            // child_pids[1..task_count] = Tasks
+            // child_pids[task_count+1..task_count+long_task_count] = Long Tasks
+            
             for (int i = 1; i < child_count; i++) {
-                zval task_info;
-                array_init(&task_info);
-                add_assoc_long(&task_info, "id", i - 1);
-                add_assoc_long(&task_info, "pid", child_pids[i]);
-                add_assoc_string(&task_info, "status", "running");
+                zval process_info;
+                array_init(&process_info);
+                add_assoc_long(&process_info, "pid", child_pids[i]);
+                add_assoc_string(&process_info, "status", "running");
                 
-                // 获取 Task 进程内存
+                // 获取进程内存
 #ifdef __APPLE__
                 snprintf(cmd, sizeof(cmd), "ps -o rss= -p %d", child_pids[i]);
-                FILE *ps_task = popen(cmd, "r");
-                if (ps_task) {
+                FILE *ps_proc = popen(cmd, "r");
+                if (ps_proc) {
                     long rss_kb = 0;
-                    if (fscanf(ps_task, "%ld", &rss_kb) == 1) {
-                        add_assoc_long(&task_info, "memory_rss_kb", rss_kb);
+                    if (fscanf(ps_proc, "%ld", &rss_kb) == 1) {
+                        add_assoc_long(&process_info, "memory_rss_kb", rss_kb);
                     }
-                    pclose(ps_task);
+                    pclose(ps_proc);
                 }
 #endif
                 
-                add_next_index_zval(&tasks_array, &task_info);
+                // 根据索引判断进程类型
+                if (i <= task_count) {
+                    // Task 进程
+                    add_assoc_long(&process_info, "id", i - 1);
+                    add_next_index_zval(&tasks_array, &process_info);
+                } else if (i <= task_count + long_task_count) {
+                    // Long Task 进程
+                    add_assoc_long(&process_info, "id", i - task_count - 1);
+                    add_next_index_zval(&long_tasks_array, &process_info);
+                } else {
+                    // 未知进程（不应该出现）
+                    zval_ptr_dtor(&process_info);
+                }
             }
             
-            add_assoc_zval(status_array, "tasks", &tasks_array);
+            if (task_count > 0) {
+                add_assoc_zval(status_array, "tasks", &tasks_array);
+            } else {
+                zval_ptr_dtor(&tasks_array);
+            }
+            
+            if (long_task_count > 0) {
+                add_assoc_zval(status_array, "long_tasks", &long_tasks_array);
+            } else {
+                zval_ptr_dtor(&long_tasks_array);
+            }
         }
         
         add_assoc_long(status_array, "total_processes", child_count + 1);
@@ -3386,8 +3739,9 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
  * @return 0=成功, -1=失败
  */
 int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len) {
-    if (!ctx || !ctx->is_task) {
-        fprintf(stderr, "[Error] sendToWorker can only be called in Task process\n");
+    // 允许 Task 和 Long Task 进程调用
+    if (!ctx || (!ctx->is_task && !ctx->is_long_task)) {
+        fprintf(stderr, "[Error] sendToWorker can only be called in Task or Long Task process\n");
         return -1;
     }
     
@@ -3401,21 +3755,25 @@ int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len) {
     msg_hdr.task_id = ++ctx->pipe_msg_counter;
     msg_hdr.success = 1;
     msg_hdr.result_len = len;
-    msg_hdr.type = 1;  // 1表示Task→Worker主动推送
+    msg_hdr.type = 1;  // 1表示Task/LongTask→Worker主动推送
+    
+    // 根据进程类型选择正确的 socket
+    int sockfd = ctx->is_long_task ? ctx->worker_sockfd : ctx->task_sockfd;
+    const char *process_type = ctx->is_long_task ? "LongTask" : "Task";
     
     // 发送到Worker (通过socketpair)
-    ssize_t n = write(ctx->task_sockfd, &msg_hdr, sizeof(msg_hdr));
+    ssize_t n = write(sockfd, &msg_hdr, sizeof(msg_hdr));
     if (n == sizeof(msg_hdr) && len > 0) {
-        n = write(ctx->task_sockfd, data, len);
+        n = write(sockfd, data, len);
     }
     
     if (n < 0) {
-        perror("[Task] Failed to send to worker");
+        perror("[Error] Failed to send to worker");
         return -1;
     }
     
-    fprintf(stderr, "[Task-%d] Sent pipe message #%lu to Worker (%zu bytes)\n", 
-           ctx->task_worker_id, msg_hdr.task_id, len);
+    fprintf(stderr, "[%s] Sent pipe message #%lu to Worker (%zu bytes)\n", 
+           process_type, msg_hdr.task_id, len);
     
     return 0;
 }

@@ -7,6 +7,7 @@
 #include "ext/standard/php_var.h"
 #include "zend_smart_str.h"
 #include <signal.h>
+#include <fcntl.h>
 #include <eXosip2/eXosip.h>
 
 /* Event extension detection */
@@ -880,8 +881,12 @@ PHP_METHOD(ExoSip, __construct) {
         val = zend_hash_str_find(Z_ARRVAL_P(configArr), "task_worker_num", 15);
         int task_worker_num = (val && Z_TYPE_P(val) == IS_LONG) ? Z_LVAL_P(val) : 0;
         
-        // ✅ 如果是多进程模式，延迟初始化（在 Worker 进程中初始化）
-        if (task_worker_num > 0) {
+        // 读取 long_task_worker_num 配置（默认1个）
+        val = zend_hash_str_find(Z_ARRVAL_P(configArr), "long_task_worker_num", 20);
+        int long_task_worker_num = (val && Z_TYPE_P(val) == IS_LONG) ? Z_LVAL_P(val) : 1;
+        
+        // 如果是多进程模式，延迟初始化（在 Worker 进程中初始化）
+        if (task_worker_num > 0 || long_task_worker_num > 0) {
             // 只创建空的 SipContext，不绑定端口
             obj->ctx = (SipContext*)calloc(1, sizeof(SipContext));
             if (!obj->ctx) {
@@ -892,6 +897,7 @@ PHP_METHOD(ExoSip, __construct) {
             // 保存配置，稍后在 Worker 中初始化
             obj->ctx->server_info = info;
             obj->ctx->task_count = task_worker_num;
+            obj->ctx->long_task_count = long_task_worker_num;
             obj->ctx->running = 0; // 标记未初始化
             
             // 读取 pid_file 配置
@@ -973,6 +979,15 @@ PHP_METHOD(ExoSip, init) {
                          info.mode, info.port, info.ip);
         RETURN_FALSE;
     }
+    
+    // 读取 Worker/Task 配置
+    val = zend_hash_str_find(Z_ARRVAL_P(configArr), "task_worker_num", 15);
+    obj->ctx->task_count = (val && Z_TYPE_P(val) == IS_LONG) ? (int)Z_LVAL_P(val) : 4;
+    
+    val = zend_hash_str_find(Z_ARRVAL_P(configArr), "long_task_worker_num", 20);
+    obj->ctx->long_task_count = (val && Z_TYPE_P(val) == IS_LONG) ? (int)Z_LVAL_P(val) : 1;  // 默认 1
+    
+    fprintf(stderr, "[DEBUG] init(): Set task_count=%d, long_task_count=%d\n", obj->ctx->task_count, obj->ctx->long_task_count);
     
     // Set global context for session close operations
     global_sip_ctx = obj->ctx;
@@ -1137,24 +1152,30 @@ PHP_METHOD(ExoSip, run) {
     }
 
     // Check if Master-Worker-Task mode is enabled
-    if (obj->ctx->task_count > 0) {
+    if (obj->ctx->task_count > 0 || obj->ctx->long_task_count > 0) {
         // 绑定 Task 回调到 SipContext（在 fork 前）
         if (!Z_ISUNDEF(obj->onTask)) {
             ZVAL_COPY(&obj->ctx->task_callback, &obj->onTask);
-            php_printf("[DEBUG] onTask callback set before fork\n");
-        } else {
+            if (obj->ctx->server_info.debug) {
+                php_printf("[DEBUG] onTask callback set before fork\n");
+            }
+        } else if (obj->ctx->server_info.debug) {
             php_printf("[DEBUG] onTask callback is not set\n");
         }
         if (!Z_ISUNDEF(obj->onTaskFinish)) {
             ZVAL_COPY(&obj->ctx->task_finish_callback, &obj->onTaskFinish);
-            php_printf("[DEBUG] onTaskFinish callback set before fork\n");
-        } else {
+            if (obj->ctx->server_info.debug) {
+                php_printf("[DEBUG] onTaskFinish callback set before fork\n");
+            }
+        } else if (obj->ctx->server_info.debug) {
             php_printf("[DEBUG] onTaskFinish callback is not set\n");
         }
         if (!Z_ISUNDEF(obj->onPipeMessage)) {
             ZVAL_COPY(&obj->ctx->pipe_message_callback, &obj->onPipeMessage);
-            php_printf("[DEBUG] onPipeMessage callback set before fork\n");
-        } else {
+            if (obj->ctx->server_info.debug) {
+                php_printf("[DEBUG] onPipeMessage callback set before fork\n");
+            }
+        } else if (obj->ctx->server_info.debug) {
             php_printf("[DEBUG] onPipeMessage callback is not set\n");
         }
         
@@ -1179,7 +1200,7 @@ PHP_METHOD(ExoSip, run) {
         if (obj->ctx->is_worker) {
             php_printf("[Worker] Initializing eXosip and entering SIP event loop (PID=%d)\n", getpid());
             
-            // ✅ Worker 进程：初始化 eXosip（绑定端口）
+            // Worker 进程：初始化 eXosip（绑定端口）
             struct eXosip_t *exosip_ctx = eXosip_malloc();
             if (!exosip_ctx) {
                 php_error_docref(NULL, E_ERROR, "[Worker] eXosip_malloc() failed");
@@ -1233,7 +1254,7 @@ PHP_METHOD(ExoSip, run) {
             
             php_exosip_register_instance(obj);
             
-            // ✅ 触发 onWorkerStart 回调
+            // 触发 onWorkerStart 回调
             if (!Z_ISUNDEF(obj->onWorkerStart) && Z_TYPE(obj->onWorkerStart) == IS_OBJECT) {
                 php_printf("[Worker] Calling onWorkerStart callback\n");
                 
@@ -1407,13 +1428,25 @@ PHP_METHOD(ExoSip, run) {
                     }
                 }
                 
+                // 每次循环都检查 Task/Long Task 消息（不依赖 SIP 事件）
                 // Check Task results
                 for (int i = 0; i < obj->ctx->task_count; i++) {
                     sip_handle_task_result(obj->ctx, obj->ctx->task_sockfds[i]);
                 }
+                
+                // Check Long Task results (sendToWorker from Long Task)
+                for (int i = 0; i < obj->ctx->long_task_count; i++) {
+                    if (obj->ctx->long_task_sockfds[i] >= 0) {
+                        sip_handle_task_result(obj->ctx, obj->ctx->long_task_sockfds[i]);
+                    }
+                }
             }
             
             php_printf("[Worker] Exiting event loop\n");
+            
+            // Worker 退出前从实例列表中移除（防止信号处理器访问野指针）
+            php_exosip_unregister_instance(obj);
+            
             RETURN_TRUE;
         }
     }
@@ -1822,16 +1855,84 @@ static void php_exosip_call_error_handler(php_exosip_obj *obj, const char *error
 }
 
 /* Signal handler for graceful shutdown (multi-instance support) */
+static volatile sig_atomic_t g_signal_received = 0;
+
 static void php_exosip_signal_handler(int sig) {
+    // 防止重复处理
+    if (g_signal_received) {
+        return;
+    }
+    g_signal_received = 1;
+    
+    // 安全遍历实例列表（可能在遍历时被修改）
     php_exosip_instance_node *node = g_instance_list;
     while (node) {
-        if (node->instance) {
-            node->instance->is_running = 0;
-            if (node->instance->ctx) {
-                node->instance->ctx->running = 0;
+        // 保存 next 指针（防止 node 被释放）
+        php_exosip_instance_node *next_node = node->next;
+        
+        if (!node->instance) {
+            node = next_node;
+            continue;
+        }
+        
+        // 检查实例是否有效（防止野指针）
+        php_exosip_obj *inst = node->instance;
+        if (!inst) {
+            node = next_node;
+            continue;
+        }
+        
+        inst->is_running = 0;
+        
+        if (!inst->ctx) {
+            node = next_node;
+            continue;
+        }
+        
+        inst->ctx->running = 0;
+        
+        // 清理 Long Task 进程（仅 Worker 进程）
+        if (inst->ctx->is_worker && 
+            inst->ctx->long_task_count > 0 &&
+            inst->ctx->long_task_pids != NULL) {
+            
+            if (inst->ctx->server_info.debug) {
+                fprintf(stderr, "[Worker] Cleaning up %d Long Task(s) on signal %d\n", 
+                           inst->ctx->long_task_count, sig);
+            }
+            
+            for (int i = 0; i < inst->ctx->long_task_count; i++) {
+                pid_t pid = inst->ctx->long_task_pids[i];
+                if (pid > 0) {
+                    if (inst->ctx->server_info.debug) {
+                        fprintf(stderr, "[Worker] Sending SIGTERM to Long Task PID=%d\n", pid);
+                    }
+                    kill(pid, SIGTERM);
+                }
+            }
+            
+            // 等待所有 Long Task 子进程退出（避免僵尸进程）
+            int wait_count = 0;
+            while (wait_count < inst->ctx->long_task_count) {
+                int status;
+                pid_t pid = waitpid(-1, &status, WNOHANG);
+                if (pid > 0) {
+                    wait_count++;
+                    if (inst->ctx->server_info.debug) {
+                        fprintf(stderr, "[Worker] Long Task PID=%d exited\n", pid);
+                    }
+                } else {
+                    break;  // 没有更多子进程
+                }
+            }
+            
+            // 清空数组
+            for (int i = 0; i < inst->ctx->long_task_count; i++) {
+                inst->ctx->long_task_pids[i] = 0;
             }
         }
-        node = node->next;
+        
+        node = next_node;
     }
 }
 
@@ -2157,8 +2258,9 @@ PHP_METHOD(ExoSip, sendToWorker) {
         RETURN_FALSE;
     }
     
-    if (!obj->ctx->is_task) {
-        php_error_docref(NULL, E_WARNING, "sendToWorker can only be called from Task process");
+    // 允许 Task 和 Long Task 进程调用 sendToWorker
+    if (!obj->ctx->is_task && !obj->ctx->is_long_task) {
+        php_error_docref(NULL, E_WARNING, "sendToWorker can only be called from Task or Long Task process");
         RETURN_FALSE;
     }
     
@@ -2188,10 +2290,10 @@ PHP_METHOD(ExoSip, sendToWorker) {
 /* ========== ExoSip::startLongTask(callable $callback) ========== */
 /**
  * 启动一个长期运行的Task进程
- * 这个Task允许永久阻塞(如Redis订阅),不占用常规Task池
+ * 将回调发送给预分配的 Long Task 进程（由 Master fork）
  * 只能在Worker进程的onWorkerStart回调中调用
  * 
- * @param callable $callback 回调函数,在独立Task进程中执行
+ * @param callable $callback 回调函数,在Long Task进程中执行
  * @return bool 成功返回true,失败返回false
  */
 PHP_METHOD(ExoSip, startLongTask) {
@@ -2213,15 +2315,27 @@ PHP_METHOD(ExoSip, startLongTask) {
         RETURN_FALSE;
     }
     
+    if (obj->ctx->server_info.debug) {
+        fprintf(stderr, "[DEBUG] startLongTask: long_task_count=%d, long_task_pids=%p, long_task_sockfds=%p\n",
+            obj->ctx->long_task_count, 
+            (void*)obj->ctx->long_task_pids,
+            (void*)obj->ctx->long_task_sockfds);
+    }
+    
+    if (obj->ctx->long_task_count <= 0) {
+        php_error_docref(NULL, E_WARNING, "No Long Task workers configured. Set 'long_task_worker_num' in init()");
+        RETURN_FALSE;
+    }
+    
     if (!zend_is_callable(callback, 0, NULL)) {
         php_error_docref(NULL, E_WARNING, "Parameter must be a valid callback");
         RETURN_FALSE;
     }
     
-    // 创建socketpair用于Task→Worker通信
+    // 直接在此处 fork Long Task 子进程（利用 fork 的内存副本特性）
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == -1) {
-        php_error_docref(NULL, E_WARNING, "socketpair failed: %s", strerror(errno));
+        php_error_docref(NULL, E_WARNING, "Failed to create socketpair: %s", strerror(errno));
         RETURN_FALSE;
     }
     
@@ -2230,49 +2344,104 @@ PHP_METHOD(ExoSip, startLongTask) {
     if (pid < 0) {
         close(sv[0]);
         close(sv[1]);
-        php_error_docref(NULL, E_WARNING, "fork failed: %s", strerror(errno));
+        php_error_docref(NULL, E_WARNING, "Failed to fork Long Task: %s", strerror(errno));
         RETURN_FALSE;
     }
     
     if (pid == 0) {
-        // 子进程(Long Task)
-        close(sv[0]); // 关闭Worker端
+        // Long Task 子进程
+        close(sv[0]);
         
-        obj->ctx->is_master = 0;
+        // 设置 Long Task 标志和 Worker 通信 socket
+        obj->ctx->is_long_task = 1;
         obj->ctx->is_worker = 0;
-        obj->ctx->is_task = 1;
-        obj->ctx->task_sockfd = sv[1];
+        obj->ctx->is_task = 0;
+        obj->ctx->worker_sockfd = sv[1];  // 保存通向 Worker 的 socket
         
-        php_printf("[LongTask] Started PID=%d, fd=%d\n", getpid(), sv[1]);
-        
-        // 调用用户回调
-        zval result;
-        zval params[1];
-        ZVAL_OBJ(&params[0], Z_OBJ_P(getThis()));
-        Z_ADDREF(params[0]);
-        
-        zend_try {
-            if (call_user_function(EG(function_table), NULL, callback, &result, 1, params) == SUCCESS) {
-                zval_ptr_dtor(&result);
+        // 关闭所有继承的 fd（避免泄漏）
+        if (obj->ctx->task_sockfds) {
+            for (int j = 0; j < obj->ctx->task_count; j++) {
+                if (obj->ctx->task_sockfds[j] >= 0) {
+                    close(obj->ctx->task_sockfds[j]);
+                }
             }
+        }
+        
+        if (obj->ctx->long_task_sockfds) {
+            for (int j = 0; j < obj->ctx->long_task_count; j++) {
+                if (obj->ctx->long_task_sockfds[j] >= 0) {
+                    close(obj->ctx->long_task_sockfds[j]);
+                }
+            }
+        }
+        
+        // 不调用 eXosip_quit()，因为：
+        // 1. Long Task 在 Worker 初始化 eXosip 之后 fork，继承了损坏的线程状态
+        // 2. eXosip_quit() 会尝试清理不存在的线程，导致错误
+        // 3. Long Task 不使用 SIP 功能，不需要 eXosip
+        // 4. Long Task 是永久运行的进程，不依赖进程退出清理
+        if (obj->ctx->ctx) {
+            obj->ctx->ctx = NULL;  // 只需置空指针，防止意外使用
+        }
+        
+        if (obj->ctx->server_info.debug) {
+            fprintf(stderr, "[LongTask] Started PID=%d, can use sendToWorker()\n", getpid());
+        }
+        
+        // 设置信号处理器（优雅退出）
+        signal(SIGTERM, SIG_DFL);  // 默认处理（允许被 kill）
+        signal(SIGINT, SIG_DFL);
+        
+        // 直接调用回调（fork 后 zval 是有效副本）
+        zval retval;
+        zval args[0];
+        
+        // 使用 zend_try 捕获异常
+        zend_try {
+            if (call_user_function(NULL, NULL, callback, &retval, 0, args) == SUCCESS) {
+                fprintf(stderr, "[LongTask] Callback completed normally\n");
+            } else {
+                fprintf(stderr, "[LongTask] Callback execution failed\n");
+            }
+            zval_ptr_dtor(&retval);
         } zend_catch {
-            php_error_docref(NULL, E_WARNING, "[LongTask] Callback threw exception");
+            fprintf(stderr, "[LongTask] Callback terminated by signal or exception\n");
         } zend_end_try();
         
-        zval_ptr_dtor(&params[0]);
         close(sv[1]);
-        
-        // Long Task结束后退出进程
+        fprintf(stderr, "[LongTask] Exiting (PID=%d)\n", getpid());
         _exit(0);
     }
     
-    // Worker进程
-    close(sv[1]); // 关闭Task端
+    // Worker 父进程
+    close(sv[1]);
     
-    // 将Task的fd加入Worker的监听
-    // TODO: 可以保存pid和fd,用于管理Long Task
+    // 设置 sv[0] 为非阻塞模式（重要！）
+    int flags = fcntl(sv[0], F_GETFL, 0);
+    if (flags != -1) {
+        fcntl(sv[0], F_SETFL, flags | O_NONBLOCK);
+    }
     
-    php_printf("[Worker] Long Task started: PID=%d, fd=%d\n", pid, sv[0]);
+    // 找到空闲槽位并记录 PID
+    int slot_id = -1;
+    for (int i = 0; i < obj->ctx->long_task_count; i++) {
+        if (obj->ctx->long_task_pids[i] == 0) {
+            obj->ctx->long_task_pids[i] = pid;
+            obj->ctx->long_task_sockfds[i] = sv[0];
+            slot_id = i;
+            break;
+        }
+    }
+    
+    if (slot_id == -1) {
+        // 没有空槽位，关闭 socket
+        close(sv[0]);
+        php_error_docref(NULL, E_WARNING, "No free slot to track Long Task PID=%d", pid);
+    }
+    
+    if (obj->ctx->server_info.debug) {
+        fprintf(stderr, "[Worker] Started Long Task PID=%d (slot=%d)\n", pid, slot_id);
+    }
     
     RETURN_TRUE;
 }

@@ -12,6 +12,14 @@
 - Laravel 集成完整流程
 - 架构图和时间线分析
 
+### [SOCKET_FORK_ARCHITECTURE.md](SOCKET_FORK_ARCHITECTURE.md) 🆕 ⭐️
+Socket Fork 架构设计文档 (v2.3.0)
+- Fork 前后建立 Socket 的对比分析
+- 当前架构设计决策和理由
+- fd 清理实现细节
+- 生产环境验证方法
+- 工业界最佳实践参考
+
 ### [MASTER_WORKER_TASK.md](MASTER_WORKER_TASK.md) ⭐️
 Master-Worker-Task 多进程架构完整说明
 - 架构设计原理

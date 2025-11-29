@@ -119,6 +119,29 @@ try {
         echo "\n";
     }
     
+    // Long Task 进程池
+    if (isset($status['long_tasks']) && is_array($status['long_tasks'])) {
+        echo "  [Long Task Worker Pool]\n";
+        echo "    Total: " . count($status['long_tasks']) . " workers\n";
+        echo "\n";
+        
+        foreach ($status['long_tasks'] as $task) {
+            $taskId = $task['id'];
+            $taskPid = $task['pid'];
+            $taskStatus = $task['status'];
+            
+            $statusIcon = $taskStatus === 'running' ? '✓' : '✗';
+            $memInfo = '';
+            if (isset($task['memory_rss_kb'])) {
+                $mem_mb = round($task['memory_rss_kb'] / 1024, 2);
+                $memInfo = " ({$mem_mb} MB)";
+            }
+            
+            echo "    LongTask-{$taskId}: PID {$taskPid} [{$statusIcon} {$taskStatus}]{$memInfo}\n";
+        }
+        echo "\n";
+    }
+    
     // 任务统计
     if (isset($status['tasks_posted']) || isset($status['tasks_failed'])) {
         echo "  [Task Statistics]\n";

@@ -1,6 +1,6 @@
 <?php
 
-require_once __DIR__ . '/ServerDevice.php';
+require_once __DIR__ . '/Device.php';
 
 /**
  * 设备管理器 - 管理 GB28181 服务器端设备
@@ -14,14 +14,14 @@ require_once __DIR__ . '/ServerDevice.php';
 class DeviceManager
 {
     // 设备对象列表 (服务器端 - 管理连接进来的设备)
-    // [deviceId => ServerDevice]
+    // [deviceId => Device]
     private array $devices = [];
-    
+
     // TCP 连接管理 (仅 TCP 模式使用)
     // [fd => deviceId] 和 [deviceId => fd] 双向映射
     private array $fdToDevice = [];
     private array $deviceToFd = [];
-    
+
     private int $heartbeatTimeout = 180;  // 3分钟心跳超时（GB28181建议值）
     private int $checkInterval = 30;      // 30秒检查一次
     private int $lastCheckTime = 0;
@@ -37,32 +37,32 @@ class DeviceManager
         $this->heartbeatTimeout = $heartbeatTimeout;
         $this->checkInterval = $checkInterval;
         $this->lastCheckTime = time();
-        
+
         $this->log("DeviceManager 已初始化");
     }
-    
+
     /**
      * 添加新设备（从 REGISTER 事件创建）
-     * 
+     *
      * @param string $deviceId 设备ID
      * @param array $info 设备初始信息 ['uri', 'ip', 'port', 'registered_at', 'expires']
-     * @return ServerDevice
+     * @return Device
      */
-    public function addDevice(string $deviceId, array $info): ServerDevice
+    public function addDevice(string $deviceId, array $info): Device
     {
         if (isset($this->devices[$deviceId])) {
             throw new \Exception("设备已存在: {$deviceId}");
         }
-        
-        $device = new ServerDevice($deviceId, $info);
+
+        $device = new Device($deviceId, $info);
         $device->markRegistered();
         $this->devices[$deviceId] = $device;
-        
+
         $this->log("设备已添加: {$deviceId}");
-        
+
         return $device;
     }
-    
+
     /**
      * 移除设备
      */
@@ -71,10 +71,10 @@ class DeviceManager
         unset($this->devices[$deviceId]);
         $this->log("设备已移除: {$deviceId}");
     }
-    
+
     /**
      * 更新设备信息（只更新已存在的设备）
-     * 
+     *
      * @param string $deviceId 设备ID
      * @param array $info 要更新的信息 ['uri', 'ip', 'port', 'registered_at', 'expires', 'info']
      * @return bool 是否更新成功
@@ -86,7 +86,7 @@ class DeviceManager
             $this->log("设备不存在，无法更新: {$deviceId}", 'WARNING');
             return false;
         }
-        
+
         // 更新设备属性
         if (isset($info['uri'])) $device->uri = $info['uri'];
         if (isset($info['ip'])) $device->ip = $info['ip'];
@@ -96,10 +96,10 @@ class DeviceManager
         if (isset($info['registered_at'])) $device->registeredAt = $info['registered_at'];
         if (isset($info['expires'])) $device->expires = $info['expires'];
         if (isset($info['info'])) $device->updateInfo($info['info']);
-        
+
         return true;
     }
-    
+
     /**
      * 获取设备信息（服务器端使用）
      * @return array|null 返回设备信息数组，兼容旧代码
@@ -109,12 +109,12 @@ class DeviceManager
         $device = $this->devices[$deviceId] ?? null;
         return $device ? $device->toArray() : null;
     }
-    
+
     /**
      * 获取设备对象
-     * @return ServerDevice|null
+     * @return Device|null
      */
-    public function getDeviceObject(string $deviceId): ?ServerDevice
+    public function getDeviceObject(string $deviceId): ?Device
     {
         return $this->devices[$deviceId] ?? null;
     }
@@ -129,7 +129,7 @@ class DeviceManager
         if ($device) {
             $wasTimeout = $device->status === 'timeout';
             $device->recordHeartbeat();
-            
+
             if ($wasTimeout) {
                 $this->log("设备恢复在线: {$deviceId}");
             }
@@ -167,11 +167,10 @@ class DeviceManager
             if ($device->isTimeout($this->heartbeatTimeout)) {
                 $device->markTimeout();
                 $timeSinceHeartbeat = $now - $device->lastHeartbeat;
-                
+
                 $this->log("设备心跳超时: {$deviceId}, 距离上次心跳: {$timeSinceHeartbeat}秒", 'ERROR');
                 $timeoutDevices[] = $device->toArray();
-            }
-            // 预警（超过一半时间没心跳）
+            } // 预警（超过一半时间没心跳）
             else if ($device->isOnline()) {
                 $timeSinceHeartbeat = $now - $device->lastHeartbeat;
                 if ($timeSinceHeartbeat > $this->heartbeatTimeout / 2) {
@@ -207,7 +206,7 @@ class DeviceManager
         $device = $this->devices[$deviceId] ?? null;
         return $device ? $device->toArray() : null;
     }
-    
+
     /**
      * 获取所有设备列表
      *
@@ -280,7 +279,7 @@ class DeviceManager
         foreach ($this->devices as $deviceId => $device) {
             if ($device->status === 'stopped' || $device->status === 'offline') {
                 $lastTime = $device->registerTime;
-                
+
                 if ($lastTime > 0 && $lastTime < $threshold) {
                     $this->removeDevice($deviceId);
                     $count++;
@@ -298,10 +297,10 @@ class DeviceManager
     // ========================================
     // TCP 连接管理 (Task 3)
     // ========================================
-    
+
     /**
      * 绑定设备到 TCP 连接
-     * 
+     *
      * @param string $deviceId 设备ID
      * @param int $fd 文件描述符
      */
@@ -315,7 +314,7 @@ class DeviceManager
                 unset($this->deviceToFd[$oldDeviceId]);
             }
         }
-        
+
         // 如果该设备已经绑定了其他 fd,先解绑
         if (isset($this->deviceToFd[$deviceId])) {
             $oldFd = $this->deviceToFd[$deviceId];
@@ -324,16 +323,16 @@ class DeviceManager
                 unset($this->fdToDevice[$oldFd]);
             }
         }
-        
+
         $this->fdToDevice[$fd] = $deviceId;
         $this->deviceToFd[$deviceId] = $fd;
-        
+
         $this->log("TCP连接已绑定: device={$deviceId}, fd={$fd}");
     }
-    
+
     /**
      * 解绑设备的 TCP 连接
-     * 
+     *
      * @param string $deviceId 设备ID
      */
     public function unbindConnectionByDevice(string $deviceId): void
@@ -342,14 +341,14 @@ class DeviceManager
             $fd = $this->deviceToFd[$deviceId];
             unset($this->fdToDevice[$fd]);
             unset($this->deviceToFd[$deviceId]);
-            
+
             $this->log("TCP连接已解绑: device={$deviceId}, fd={$fd}");
         }
     }
-    
+
     /**
      * 解绑 TCP 连接(通过 fd)
-     * 
+     *
      * @param int $fd 文件描述符
      */
     public function unbindConnectionByFd(int $fd): void
@@ -358,9 +357,9 @@ class DeviceManager
             $deviceId = $this->fdToDevice[$fd];
             unset($this->deviceToFd[$deviceId]);
             unset($this->fdToDevice[$fd]);
-            
+
             $this->log("TCP连接已断开: device={$deviceId}, fd={$fd}");
-            
+
             // 标记设备离线
             $device = $this->getDeviceObject($deviceId);
             if ($device) {
@@ -369,10 +368,10 @@ class DeviceManager
             }
         }
     }
-    
+
     /**
      * 通过设备ID获取文件描述符
-     * 
+     *
      * @param string $deviceId 设备ID
      * @return int|null 文件描述符,如果未绑定返回 null
      */
@@ -380,10 +379,10 @@ class DeviceManager
     {
         return $this->deviceToFd[$deviceId] ?? null;
     }
-    
+
     /**
      * 通过文件描述符获取设备ID
-     * 
+     *
      * @param int $fd 文件描述符
      * @return string|null 设备ID,如果未绑定返回 null
      */
@@ -391,20 +390,20 @@ class DeviceManager
     {
         return $this->fdToDevice[$fd] ?? null;
     }
-    
+
     /**
      * 获取所有 TCP 连接信息
-     * 
+     *
      * @return array ['device_id' => fd, ...]
      */
     public function getAllConnections(): array
     {
         return $this->deviceToFd;
     }
-    
+
     /**
      * 检查设备是否有活跃的 TCP 连接
-     * 
+     *
      * @param string $deviceId 设备ID
      * @return bool
      */
