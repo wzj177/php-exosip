@@ -9,6 +9,8 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <eXosip2/eXosip.h>
+#include <osipparser2/sdp_message.h>
+#include <osipparser2/osip_list.h>
 
 /* Event extension detection */
 static zend_bool has_event_extension = 0;
@@ -42,6 +44,21 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendmessage, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, to, IS_STRING, 0)
     ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
     ZEND_ARG_TYPE_INFO(0, contentType, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendinvite, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, toUri, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, sdp, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendbye, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, callId, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, dialogId, IS_LONG, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendack, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, dialogId, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendresponse, 0, 0, 2)
@@ -95,6 +112,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getrunstatus, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, pid_file, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_parsesdp, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, sdp_body, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
 /* SipEvent class arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipevent_gettype, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -133,11 +154,17 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_sipevent_getheader, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sipevent_getsdp, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 /* SipSession class arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipsession_getid, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipsession_getcallid, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sipsession_getdialogid, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipsession_getfromuri, 0, 0, 0)
@@ -254,6 +281,14 @@ PHP_METHOD(SipSession, getCallId) {
     RETURN_NULL();
 }
 
+PHP_METHOD(SipSession, getDialogId) {
+    php_sip_session_obj *obj = php_sip_session_from_obj(Z_OBJ_P(getThis()));
+    if (obj->session_info) {
+        RETURN_LONG(obj->session_info->dialog_id);
+    }
+    RETURN_NULL();
+}
+
 PHP_METHOD(SipSession, getFromUri) {
     php_sip_session_obj *obj = php_sip_session_from_obj(Z_OBJ_P(getThis()));
     if (obj->session_info && strlen(obj->session_info->from_uri) > 0) {  // 修复：检查字符串长度而不是地址
@@ -320,6 +355,7 @@ PHP_METHOD(SipSession, close) {
 const zend_function_entry sip_session_methods[] = {
     PHP_ME(SipSession, getId, arginfo_sipsession_getid, ZEND_ACC_PUBLIC)
     PHP_ME(SipSession, getCallId, arginfo_sipsession_getcallid, ZEND_ACC_PUBLIC)
+    PHP_ME(SipSession, getDialogId, arginfo_sipsession_getdialogid, ZEND_ACC_PUBLIC)
     PHP_ME(SipSession, getFromUri, arginfo_sipsession_getfromuri, ZEND_ACC_PUBLIC)
     PHP_ME(SipSession, getToUri, arginfo_sipsession_gettouri, ZEND_ACC_PUBLIC)
     PHP_ME(SipSession, getState, arginfo_sipsession_getstate, ZEND_ACC_PUBLIC)
@@ -334,6 +370,8 @@ typedef struct _php_sip_event_obj {
     int event_code;      // SIP 事件代码
     int response_code;   // SIP 响应代码 (1xx-6xx)
     int tid;             // 事务ID
+    int call_id;         // Call ID (cid)
+    int dialog_id;       // Dialog ID (did)
     int expires;         // Expires 头值（秒）
     char *from_uri;
     char *to_uri;
@@ -377,6 +415,8 @@ static zend_object *php_sip_event_create_object(zend_class_entry *ce) {
     obj->event_type = 0;
     obj->event_code = 0;
     obj->tid = 0;
+    obj->call_id = 0;
+    obj->dialog_id = 0;
     obj->expires = -1;
     obj->from_uri = NULL;
     obj->to_uri = NULL;
@@ -427,6 +467,7 @@ PHP_METHOD(SipEvent, getRequestUri) {
 
 PHP_METHOD(SipEvent, getBody) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    fprintf(stderr, "[PHP-DEBUG] getBody called: obj=%p, body=%p\n", obj, obj->body);
     if (obj->body) {
         RETURN_STRING(obj->body);
     }
@@ -435,6 +476,8 @@ PHP_METHOD(SipEvent, getBody) {
 
 PHP_METHOD(SipEvent, getContentType) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    fprintf(stderr, "[PHP-DEBUG] getContentType called: obj=%p, content_type=%p (%s)\n", 
+            obj, obj->content_type, obj->content_type ? obj->content_type : "NULL");
     if (obj->content_type) {
         RETURN_STRING(obj->content_type);
     }
@@ -444,6 +487,16 @@ PHP_METHOD(SipEvent, getContentType) {
 PHP_METHOD(SipEvent, getTid) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
     RETURN_LONG(obj->tid);
+}
+
+PHP_METHOD(SipEvent, getCallId) {
+    php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    RETURN_LONG(obj->call_id);
+}
+
+PHP_METHOD(SipEvent, getDialogId) {
+    php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    RETURN_LONG(obj->dialog_id);
 }
 
 PHP_METHOD(SipEvent, getExpires) {
@@ -489,6 +542,233 @@ PHP_METHOD(SipEvent, getHeader) {
     RETURN_NULL();
 }
 
+PHP_METHOD(SipEvent, getSdp) {
+    php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    
+    // 如果 body 存在且 content_type 是 application/sdp，则解析
+    if (!obj->body || !obj->content_type) {
+        RETURN_NULL();
+    }
+    
+    // 检查 Content-Type 是否是 SDP
+    if (strstr(obj->content_type, "application/sdp") == NULL) {
+        RETURN_NULL();
+    }
+    
+    size_t body_len = strlen(obj->body);
+    
+    // GB28181 扩展字段存储
+    char gb28181_y[128] = {0};  // y= SSRC
+    char gb28181_f[256] = {0};  // f= f参数
+    
+    // GB28181 兼容性处理：提取并移除非标准字段 (y=, f=)
+    // osip2 是严格的 RFC 4566 解析器，不支持私有扩展
+    // 策略：逐行扫描，检测 y= 和 f= 行并跳过
+    char *cleaned_sdp = (char*)emalloc(body_len + 1);
+    const char *read_pos = obj->body;
+    char *write_pos = cleaned_sdp;
+    
+    while (*read_pos) {
+        const char *line_start = read_pos;
+        
+        // 找到行尾
+        while (*read_pos && *read_pos != '\r' && *read_pos != '\n') {
+            read_pos++;
+        }
+        
+        size_t line_len = read_pos - line_start;
+        int skip_line = 0;
+        
+        // 检查是否是 GB28181 私有字段（至少2字符：x=）
+        if (line_len >= 2 && line_start[1] == '=') {
+            if (line_start[0] == 'y') {
+                // y=0100000001
+                skip_line = 1;
+                size_t value_len = line_len - 2;
+                if (value_len > 0 && value_len < sizeof(gb28181_y)) {
+                    memcpy(gb28181_y, line_start + 2, value_len);
+                    gb28181_y[value_len] = '\0';
+                }
+            } else if (line_start[0] == 'f') {
+                // f= 或 f=v/////a/1/2/3
+                skip_line = 1;
+                size_t value_len = line_len - 2;
+                if (value_len > 0 && value_len < sizeof(gb28181_f)) {
+                    memcpy(gb28181_f, line_start + 2, value_len);
+                    gb28181_f[value_len] = '\0';
+                }
+            }
+        }
+        
+        // 如果不跳过，复制整行到输出
+        if (!skip_line && line_len > 0) {
+            memcpy(write_pos, line_start, line_len);
+            write_pos += line_len;
+        }
+        
+        // 处理换行符（如果不跳过此行，也复制换行符）
+        if (*read_pos == '\r') {
+            if (!skip_line) {
+                *write_pos++ = '\r';
+            }
+            read_pos++;
+            if (*read_pos == '\n') {
+                if (!skip_line) {
+                    *write_pos++ = '\n';
+                }
+                read_pos++;
+            }
+        } else if (*read_pos == '\n') {
+            if (!skip_line) {
+                *write_pos++ = '\n';
+            }
+            read_pos++;
+        }
+    }
+    
+    *write_pos = '\0';
+    
+    // 使用 osip2 原生 SDP 解析器
+    sdp_message_t *sdp = NULL;
+    int ret = sdp_message_init(&sdp);
+    
+    if (ret != 0 || sdp == NULL) {
+        efree(cleaned_sdp);
+        RETURN_NULL();
+    }
+    
+    // 解析清理后的 SDP 字符串
+    ret = sdp_message_parse(sdp, cleaned_sdp);
+    efree(cleaned_sdp);
+    
+    if (ret != 0) {
+        sdp_message_free(sdp);
+        RETURN_NULL();
+    }
+    
+    // 创建返回数组（复用 parseSdp 的逻辑）
+    array_init(return_value);
+    
+    // 提取 v= (version)
+    char *version = sdp_message_v_version_get(sdp);
+    if (version) {
+        add_assoc_string(return_value, "version", version);
+    }
+    
+    // 提取 o= (origin)
+    char *o_username = sdp_message_o_username_get(sdp);
+    char *o_sess_id = sdp_message_o_sess_id_get(sdp);
+    char *o_sess_version = sdp_message_o_sess_version_get(sdp);
+    char *o_nettype = sdp_message_o_nettype_get(sdp);
+    char *o_addrtype = sdp_message_o_addrtype_get(sdp);
+    char *o_addr = sdp_message_o_addr_get(sdp);
+    
+    if (o_username || o_sess_id || o_addr) {
+        zval origin;
+        array_init(&origin);
+        if (o_username) add_assoc_string(&origin, "username", o_username);
+        if (o_sess_id) add_assoc_string(&origin, "session_id", o_sess_id);
+        if (o_sess_version) add_assoc_string(&origin, "session_version", o_sess_version);
+        if (o_nettype) add_assoc_string(&origin, "nettype", o_nettype);
+        if (o_addrtype) add_assoc_string(&origin, "addrtype", o_addrtype);
+        if (o_addr) add_assoc_string(&origin, "addr", o_addr);
+        add_assoc_zval(return_value, "origin", &origin);
+    }
+    
+    // 提取 s= (session name)
+    char *s_name = sdp_message_s_name_get(sdp);
+    if (s_name) {
+        add_assoc_string(return_value, "session_name", s_name);
+    }
+    
+    // 提取 c= (connection)
+    sdp_connection_t *conn = sdp_message_connection_get(sdp, 0, 0);
+    if (conn && conn->c_addr) {
+        zval connection;
+        array_init(&connection);
+        if (conn->c_nettype) add_assoc_string(&connection, "nettype", conn->c_nettype);
+        if (conn->c_addrtype) add_assoc_string(&connection, "addrtype", conn->c_addrtype);
+        if (conn->c_addr) add_assoc_string(&connection, "addr", conn->c_addr);
+        add_assoc_zval(return_value, "connection", &connection);
+    }
+    
+    // 提取 m= (medias)
+    zval medias;
+    array_init(&medias);
+    
+    int media_pos = 0;
+    sdp_media_t *media = NULL;
+    
+    while ((media = (sdp_media_t*)osip_list_get(&sdp->m_medias, media_pos)) != NULL) {
+        zval media_arr;
+        array_init(&media_arr);
+        
+        if (media->m_media) add_assoc_string(&media_arr, "media", media->m_media);
+        if (media->m_port) add_assoc_string(&media_arr, "port", media->m_port);
+        if (media->m_proto) add_assoc_string(&media_arr, "proto", media->m_proto);
+        
+        // Payloads
+        zval payloads;
+        array_init(&payloads);
+        int payload_pos = 0;
+        char *payload = NULL;
+        while ((payload = (char*)osip_list_get(&media->m_payloads, payload_pos)) != NULL) {
+            add_next_index_string(&payloads, payload);
+            payload_pos++;
+        }
+        add_assoc_zval(&media_arr, "payloads", &payloads);
+        
+        // Media connection
+        sdp_connection_t *media_conn = (sdp_connection_t*)osip_list_get(&media->c_connections, 0);
+        if (media_conn && media_conn->c_addr) {
+            zval m_conn;
+            array_init(&m_conn);
+            if (media_conn->c_nettype) add_assoc_string(&m_conn, "nettype", media_conn->c_nettype);
+            if (media_conn->c_addrtype) add_assoc_string(&m_conn, "addrtype", media_conn->c_addrtype);
+            if (media_conn->c_addr) add_assoc_string(&m_conn, "addr", media_conn->c_addr);
+            add_assoc_zval(&media_arr, "connection", &m_conn);
+        }
+        
+        // Attributes
+        zval attributes;
+        array_init(&attributes);
+        int attr_pos = 0;
+        sdp_attribute_t *attr = NULL;
+        while ((attr = (sdp_attribute_t*)osip_list_get(&media->a_attributes, attr_pos)) != NULL) {
+            if (attr->a_att_field) {
+                if (attr->a_att_value) {
+                    add_assoc_string(&attributes, attr->a_att_field, attr->a_att_value);
+                } else {
+                    add_assoc_null(&attributes, attr->a_att_field);
+                }
+            }
+            attr_pos++;
+        }
+        add_assoc_zval(&media_arr, "attributes", &attributes);
+        
+        add_next_index_zval(&medias, &media_arr);
+        media_pos++;
+    }
+    
+    add_assoc_zval(return_value, "medias", &medias);
+    
+    // 添加 GB28181 扩展字段
+    if (gb28181_y[0] != '\0' || gb28181_f[0] != '\0') {
+        zval gb28181;
+        array_init(&gb28181);
+        if (gb28181_y[0] != '\0') {
+            add_assoc_string(&gb28181, "ssrc", gb28181_y);
+        }
+        if (gb28181_f[0] != '\0') {
+            add_assoc_string(&gb28181, "f", gb28181_f);
+        }
+        add_assoc_zval(return_value, "gb28181", &gb28181);
+    }
+    
+    // 清理
+    sdp_message_free(sdp);
+}
+
 const zend_function_entry sip_event_methods[] = {
     PHP_ME(SipEvent, getType, arginfo_sipevent_gettype, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getCode, arginfo_sipevent_getcode, ZEND_ACC_PUBLIC)
@@ -498,10 +778,13 @@ const zend_function_entry sip_event_methods[] = {
     PHP_ME(SipEvent, getBody, arginfo_sipevent_getbody, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getContentType, arginfo_sipevent_getcontenttype, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getTid, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
+    PHP_ME(SipEvent, getCallId, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
+    PHP_ME(SipEvent, getDialogId, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getExpires, arginfo_sipevent_getexpires, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getSession, arginfo_sipevent_getsession, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getConnection, arginfo_sipevent_getconnection, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getHeader, arginfo_sipevent_getheader, ZEND_ACC_PUBLIC)
+    PHP_ME(SipEvent, getSdp, arginfo_sipevent_getsdp, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -972,6 +1255,10 @@ PHP_METHOD(ExoSip, init) {
     val = zend_hash_str_find(Z_ARRVAL_P(configArr), "debug", 5);
     info.debug = (val && (Z_TYPE_P(val) == IS_TRUE || (Z_TYPE_P(val) == IS_LONG && Z_LVAL_P(val)))) ? 1 : 0;
 
+    // 🔥 读取公网IP配置 (用于NAT穿透)
+    val = zend_hash_str_find(Z_ARRVAL_P(configArr), "public_ip", 9);
+    info.public_ip = (val && Z_TYPE_P(val) == IS_STRING) ? Z_STRVAL_P(val) : "";
+
     php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
     obj->ctx = exosip_init_wrapper(&info);
     if (!obj->ctx) {
@@ -1063,8 +1350,18 @@ PHP_METHOD(ExoSip, processEvents) {
                 event_obj->event_type = Z_LVAL_P(val);
             }
             
-            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "ss_status", 9)) != NULL) {
+            // 修复: 从 status_code 读取响应码,而不是 ss_status
+            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "status_code", 11)) != NULL) {
                 event_obj->event_code = Z_LVAL_P(val);
+            }
+            
+            // 添加: 读取 call_id 和 dialog_id
+            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "cid", 3)) != NULL) {
+                event_obj->call_id = Z_LVAL_P(val);
+            }
+            
+            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "did", 3)) != NULL) {
+                event_obj->dialog_id = Z_LVAL_P(val);
             }
             
             if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "from_uri", 8)) != NULL) {
@@ -1088,6 +1385,13 @@ PHP_METHOD(ExoSip, processEvents) {
             if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "body", 4)) != NULL) {
                 if (Z_TYPE_P(val) == IS_STRING) {
                     event_obj->body = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
+                }
+            }
+            
+            // 读取 content_type
+            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "content_type", 12)) != NULL) {
+                if (Z_TYPE_P(val) == IS_STRING) {
+                    event_obj->content_type = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
                 }
             }
             
@@ -1229,6 +1533,42 @@ PHP_METHOD(ExoSip, run) {
                 php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d",
                     obj->ctx->server_info.ip, obj->ctx->server_info.port);
                 RETURN_FALSE;
+            }
+            
+            // 关键修复: 设置公网IP用于 Contact 和 Via 头
+            // 优先级: public_ip 配置 > 自动检测 > 监听IP
+            const char *masquerade_ip = NULL;
+            
+            if (obj->ctx->server_info.public_ip && strlen(obj->ctx->server_info.public_ip) > 0) {
+                // 使用配置的公网IP
+                masquerade_ip = obj->ctx->server_info.public_ip;
+                php_printf("[Worker] Using configured public IP for Contact/Via headers: %s:%d\n",
+                    masquerade_ip, obj->ctx->server_info.port);
+            } else if (strcmp(obj->ctx->server_info.ip, "0.0.0.0") == 0) {
+                // 自动检测本地IP
+                static char local_ip[256] = {0};
+                FILE *fp = popen("ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -1", "r");
+                if (fp) {
+                    if (fgets(local_ip, sizeof(local_ip), fp) != NULL) {
+                        local_ip[strcspn(local_ip, "\n")] = 0; // 移除换行符
+                        if (strlen(local_ip) > 0) {
+                            masquerade_ip = local_ip;
+                            php_printf("[Worker] Auto-detected local IP for Contact/Via headers: %s:%d\n",
+                                masquerade_ip, obj->ctx->server_info.port);
+                        }
+                    }
+                    pclose(fp);
+                }
+            } else {
+                // 使用监听IP
+                masquerade_ip = obj->ctx->server_info.ip;
+                php_printf("[Worker] Using listen IP for Contact/Via headers: %s:%d\n",
+                    masquerade_ip, obj->ctx->server_info.port);
+            }
+            
+            // 设置 masquerade contact
+            if (masquerade_ip != NULL) {
+                eXosip_masquerade_contact(exosip_ctx, masquerade_ip, obj->ctx->server_info.port);
             }
             
             obj->ctx->ctx = exosip_ctx;
@@ -1629,6 +1969,16 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
         event_obj->tid = Z_LVAL_P(val);
     }
     
+    // Parse call ID
+    if ((val = zend_hash_str_find(ht, "cid", 3)) != NULL && Z_TYPE_P(val) == IS_LONG) {
+        event_obj->call_id = Z_LVAL_P(val);
+    }
+    
+    // Parse dialog ID
+    if ((val = zend_hash_str_find(ht, "did", 3)) != NULL && Z_TYPE_P(val) == IS_LONG) {
+        event_obj->dialog_id = Z_LVAL_P(val);
+    }
+    
     // Parse Expires header
     if ((val = zend_hash_str_find(ht, "expires", 7)) != NULL && Z_TYPE_P(val) == IS_LONG) {
         event_obj->expires = Z_LVAL_P(val);
@@ -1637,6 +1987,10 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
     // Parse response code
     if ((val = zend_hash_str_find(ht, "code", 4)) != NULL && Z_TYPE_P(val) == IS_LONG) {
         event_obj->response_code = Z_LVAL_P(val);
+        event_obj->event_code = Z_LVAL_P(val);
+    } else if ((val = zend_hash_str_find(ht, "status_code", 11)) != NULL && Z_TYPE_P(val) == IS_LONG) {
+        event_obj->response_code = Z_LVAL_P(val);
+        event_obj->event_code = Z_LVAL_P(val);
     }
     
     // Parse URIs
@@ -1655,11 +2009,19 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
     // Parse message body
     if ((val = zend_hash_str_find(ht, "body", 4)) != NULL && Z_TYPE_P(val) == IS_STRING) {
         event_obj->body = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
+        fprintf(stderr, "[PHP-DEBUG] obj=%p body hydrated: %.50s... (len=%zu)\n", event_obj, event_obj->body, Z_STRLEN_P(val));
+    } else {
+        fprintf(stderr, "[PHP-DEBUG] obj=%p body NOT found in array (val=%p, type=%d)\n", 
+                event_obj, val, val ? Z_TYPE_P(val) : -1);
     }
     
     // Parse content type
     if ((val = zend_hash_str_find(ht, "content_type", 12)) != NULL && Z_TYPE_P(val) == IS_STRING) {
         event_obj->content_type = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
+        fprintf(stderr, "[PHP-DEBUG] obj=%p content_type hydrated: %s\n", event_obj, event_obj->content_type);
+    } else {
+        fprintf(stderr, "[PHP-DEBUG] obj=%p content_type NOT found in array (val=%p, type=%d)\n",
+                event_obj, val, val ? Z_TYPE_P(val) : -1);
     }
     
     // Parse session information
@@ -2004,6 +2366,86 @@ PHP_METHOD(ExoSip, sendMessage) {
     RETURN_BOOL(result == 0);
 }
 
+/* ========== ExoSip::sendInvite(string $toUri, string $sdp, array $headers = []) ========== */
+PHP_METHOD(ExoSip, sendInvite) {
+    char *to_uri, *sdp;
+    size_t to_uri_len, sdp_len;
+    HashTable *headers = NULL;
+    
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STRING(to_uri, to_uri_len)
+        Z_PARAM_STRING(sdp, sdp_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_HT(headers)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    // 从 headers 数组中提取 Subject
+    char *subject = NULL;
+    if (headers) {
+        zval *subject_val = zend_hash_str_find(headers, "Subject", sizeof("Subject") - 1);
+        if (subject_val && Z_TYPE_P(subject_val) == IS_STRING) {
+            subject = Z_STRVAL_P(subject_val);
+        }
+    }
+    
+    // 调用底层实现
+    int call_id = sip_send_invite(obj->ctx, to_uri, sdp, subject);
+    
+    if (call_id < 0) {
+        RETURN_FALSE;
+    }
+    
+    RETURN_LONG(call_id);
+}
+
+/* ========== ExoSip::sendBye(int $callId, int $dialogId = -1) ========== */
+PHP_METHOD(ExoSip, sendBye) {
+    zend_long call_id, dialog_id = -1;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(call_id)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(dialog_id)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    // 调用底层实现
+    int result = sip_send_bye(obj->ctx, (int)call_id, (int)dialog_id);
+    
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::sendAck(int $dialogId) ========== */
+PHP_METHOD(ExoSip, sendAck) {
+    zend_long dialog_id;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(dialog_id)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    // 调用底层实现
+    int result = sip_send_ack(obj->ctx, (int)dialog_id);
+    
+    RETURN_BOOL(result == 0);
+}
+
 /* ========== ExoSip::sendResponse(int $tid, int $code, string $reason, array $headers) ========== */
 PHP_METHOD(ExoSip, sendResponse) {
     zend_long tid, code;
@@ -2207,6 +2649,270 @@ PHP_METHOD(ExoSip, getStats) {
     add_assoc_bool(&handlers, "onClose", !Z_ISNULL(obj->onClose));
     
     add_assoc_zval(return_value, "event_handlers", &handlers);
+}
+
+/* ========== ExoSip::parseSdp() - 原生 SDP 解析（静态方法） ========== */
+/**
+ * 使用 osip2 原生 API 解析 SDP 
+ * 生产级别实现，支持 eXosip2 5.1.2 (macOS) 和 5.3.0 (Linux)
+ * 
+ * @param string $sdp_body SDP 文本内容
+ * @return array|null 解析后的 SDP 数组，失败返回 null
+ * 
+ * 返回数组结构：
+ * [
+ *   'version' => '0',
+ *   'origin' => ['username' => ..., 'session_id' => ..., 'addr' => ...],
+ *   'session_name' => 'Play',
+ *   'connection' => ['nettype' => 'IN', 'addrtype' => 'IP4', 'addr' => '192.168.1.100'],
+ *   'medias' => [
+ *     ['media' => 'video', 'port' => '6000', 'proto' => 'RTP/AVP', 
+ *      'payloads' => ['96', '98'], 'attributes' => [...]],
+ *     ['media' => 'audio', 'port' => '6002', 'proto' => 'RTP/AVP', ...]
+ *   ]
+ * ]
+ */
+PHP_METHOD(ExoSip, parseSdp) {
+    char *sdp_str;
+    size_t sdp_len;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(sdp_str, sdp_len)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    // 参数验证
+    if (!sdp_str || sdp_len == 0) {
+        RETURN_NULL();
+    }
+    
+    // GB28181 扩展字段存储
+    char gb28181_y[128] = {0};  // y= SSRC
+    char gb28181_f[256] = {0};  // f= f参数
+    
+    // GB28181 兼容性处理：提取并移除非标准字段 (y=, f=)
+    // osip2 是严格的 RFC 4566 解析器，不支持私有扩展
+    // 
+    // 策略：逐行扫描，检测 y= 和 f= 行并跳过
+    char *cleaned_sdp = (char*)emalloc(sdp_len + 1);
+    const char *read_pos = sdp_str;
+    char *write_pos = cleaned_sdp;
+    
+    while (*read_pos) {
+        const char *line_start = read_pos;
+        
+        // 找到行尾
+        while (*read_pos && *read_pos != '\r' && *read_pos != '\n') {
+            read_pos++;
+        }
+        
+        size_t line_len = read_pos - line_start;
+        int skip_line = 0;
+        
+        // 检查是否是 GB28181 私有字段（至少2字符：x=）
+        if (line_len >= 2 && line_start[1] == '=') {
+            if (line_start[0] == 'y') {
+                // y=0100000001
+                skip_line = 1;
+                size_t value_len = line_len - 2;
+                if (value_len > 0 && value_len < sizeof(gb28181_y)) {
+                    memcpy(gb28181_y, line_start + 2, value_len);
+                    gb28181_y[value_len] = '\0';
+                }
+            } else if (line_start[0] == 'f') {
+                // f= 或 f=v/////a/1/2/3
+                skip_line = 1;
+                size_t value_len = line_len - 2;
+                if (value_len > 0 && value_len < sizeof(gb28181_f)) {
+                    memcpy(gb28181_f, line_start + 2, value_len);
+                    gb28181_f[value_len] = '\0';
+                }
+            }
+        }
+        
+        // 如果不跳过，复制整行到输出
+        if (!skip_line && line_len > 0) {
+            memcpy(write_pos, line_start, line_len);
+            write_pos += line_len;
+        }
+        
+        // 处理换行符（如果不跳过此行，也复制换行符）
+        if (*read_pos == '\r') {
+            if (!skip_line) {
+                *write_pos++ = '\r';
+            }
+            read_pos++;
+            if (*read_pos == '\n') {
+                if (!skip_line) {
+                    *write_pos++ = '\n';
+                }
+                read_pos++;
+            }
+        } else if (*read_pos == '\n') {
+            if (!skip_line) {
+                *write_pos++ = '\n';
+            }
+            read_pos++;
+        }
+    }
+    
+    *write_pos = '\0';
+    
+    // 使用 osip2 原生 SDP 解析器
+    sdp_message_t *sdp = NULL;
+    int ret = sdp_message_init(&sdp);
+    
+    if (ret != 0 || sdp == NULL) {
+        efree(cleaned_sdp);
+        php_error_docref(NULL, E_WARNING, "Failed to initialize SDP message structure");
+        RETURN_NULL();
+    }
+    
+    // 解析清理后的 SDP 字符串
+    ret = sdp_message_parse(sdp, cleaned_sdp);
+    efree(cleaned_sdp);
+    
+    if (ret != 0) {
+        sdp_message_free(sdp);
+        php_error_docref(NULL, E_WARNING, "Failed to parse SDP body (invalid format)");
+        RETURN_NULL();
+    }
+    
+    // 创建返回数组
+    array_init(return_value);
+    
+    // 1. 提取 v= (version)
+    char *version = sdp_message_v_version_get(sdp);
+    if (version) {
+        add_assoc_string(return_value, "version", version);
+    }
+    
+    // 2. 提取 o= (origin)
+    char *o_username = sdp_message_o_username_get(sdp);
+    char *o_sess_id = sdp_message_o_sess_id_get(sdp);
+    char *o_sess_version = sdp_message_o_sess_version_get(sdp);
+    char *o_nettype = sdp_message_o_nettype_get(sdp);
+    char *o_addrtype = sdp_message_o_addrtype_get(sdp);
+    char *o_addr = sdp_message_o_addr_get(sdp);
+    
+    if (o_username || o_sess_id || o_addr) {
+        zval origin;
+        array_init(&origin);
+        if (o_username) add_assoc_string(&origin, "username", o_username);
+        if (o_sess_id) add_assoc_string(&origin, "session_id", o_sess_id);
+        if (o_sess_version) add_assoc_string(&origin, "session_version", o_sess_version);
+        if (o_nettype) add_assoc_string(&origin, "nettype", o_nettype);
+        if (o_addrtype) add_assoc_string(&origin, "addrtype", o_addrtype);
+        if (o_addr) add_assoc_string(&origin, "addr", o_addr);
+        add_assoc_zval(return_value, "origin", &origin);
+    }
+    
+    // 3. 提取 s= (session name)
+    char *s_name = sdp_message_s_name_get(sdp);
+    if (s_name) {
+        add_assoc_string(return_value, "session_name", s_name);
+    }
+    
+    // 4. 提取 c= (connection) - 会话级别
+    sdp_connection_t *conn = sdp_message_connection_get(sdp, 0, 0);
+    if (conn && conn->c_addr) {
+        zval connection;
+        array_init(&connection);
+        if (conn->c_nettype) add_assoc_string(&connection, "nettype", conn->c_nettype);
+        if (conn->c_addrtype) add_assoc_string(&connection, "addrtype", conn->c_addrtype);
+        if (conn->c_addr) add_assoc_string(&connection, "addr", conn->c_addr);
+        add_assoc_zval(return_value, "connection", &connection);
+    }
+    
+    // 5. 提取 m= (medias) - 支持多个媒体流
+    zval medias;
+    array_init(&medias);
+    
+    int media_pos = 0;
+    sdp_media_t *media = NULL;
+    
+    while ((media = (sdp_media_t*)osip_list_get(&sdp->m_medias, media_pos)) != NULL) {
+        zval media_arr;
+        array_init(&media_arr);
+        
+        // 媒体类型 (audio/video/application)
+        if (media->m_media) {
+            add_assoc_string(&media_arr, "media", media->m_media);
+        }
+        
+        // 端口号
+        if (media->m_port) {
+            add_assoc_string(&media_arr, "port", media->m_port);
+        }
+        
+        // 传输协议 (RTP/AVP, TCP/RTP/AVP, UDP/TLS/RTP/SAVP等)
+        if (media->m_proto) {
+            add_assoc_string(&media_arr, "proto", media->m_proto);
+        }
+        
+        // Payload 类型列表 (96, 98, 97, 0, 8 等)
+        zval payloads;
+        array_init(&payloads);
+        int payload_pos = 0;
+        char *payload = NULL;
+        while ((payload = (char*)osip_list_get(&media->m_payloads, payload_pos)) != NULL) {
+            add_next_index_string(&payloads, payload);
+            payload_pos++;
+        }
+        add_assoc_zval(&media_arr, "payloads", &payloads);
+        
+        // 媒体级别的连接信息
+        sdp_connection_t *media_conn = (sdp_connection_t*)osip_list_get(&media->c_connections, 0);
+        if (media_conn && media_conn->c_addr) {
+            zval m_conn;
+            array_init(&m_conn);
+            if (media_conn->c_nettype) add_assoc_string(&m_conn, "nettype", media_conn->c_nettype);
+            if (media_conn->c_addrtype) add_assoc_string(&m_conn, "addrtype", media_conn->c_addrtype);
+            if (media_conn->c_addr) add_assoc_string(&m_conn, "addr", media_conn->c_addr);
+            add_assoc_zval(&media_arr, "connection", &m_conn);
+        }
+        
+        // a= 属性列表 (rtpmap, fmtp, sendonly, recvonly, setup等)
+        zval attributes;
+        array_init(&attributes);
+        int attr_pos = 0;
+        sdp_attribute_t *attr = NULL;
+        while ((attr = (sdp_attribute_t*)osip_list_get(&media->a_attributes, attr_pos)) != NULL) {
+            if (attr->a_att_field) {
+                if (attr->a_att_value) {
+                    // 有值的属性: a=rtpmap:96 PS/90000
+                    add_assoc_string(&attributes, attr->a_att_field, attr->a_att_value);
+                } else {
+                    // 无值的属性: a=sendonly
+                    add_assoc_null(&attributes, attr->a_att_field);
+                }
+            }
+            attr_pos++;
+        }
+        add_assoc_zval(&media_arr, "attributes", &attributes);
+        
+        add_next_index_zval(&medias, &media_arr);
+        media_pos++;
+    }
+    
+    add_assoc_zval(return_value, "medias", &medias);
+    
+    // 6. 添加 GB28181 扩展字段 (如果存在)
+    if (strlen(gb28181_y) > 0 || strlen(gb28181_f) > 0) {
+        zval gb28181;
+        array_init(&gb28181);
+        
+        if (strlen(gb28181_y) > 0) {
+            add_assoc_string(&gb28181, "ssrc", gb28181_y);  // y= SSRC字段
+        }
+        if (strlen(gb28181_f) > 0) {
+            add_assoc_string(&gb28181, "f", gb28181_f);     // f= f参数
+        }
+        
+        add_assoc_zval(return_value, "gb28181", &gb28181);
+    }
+    
+    // 清理
+    sdp_message_free(sdp);
 }
 
 PHP_METHOD(ExoSip, addTask) {
@@ -2493,12 +3199,18 @@ const zend_function_entry exosip_methods[] = {
     
     /* Message handling */
     PHP_ME(ExoSip, sendMessage, arginfo_exosip_sendmessage, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendInvite, arginfo_exosip_sendinvite, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendBye, arginfo_exosip_sendbye, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendAck, arginfo_exosip_sendack, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendResponse, arginfo_exosip_sendresponse, ZEND_ACC_PUBLIC)
     
     /* Configuration and statistics */
     PHP_ME(ExoSip, setConfig, arginfo_exosip_setconfig, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getConfig, arginfo_exosip_getconfig, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getStats, arginfo_exosip_getstats, ZEND_ACC_PUBLIC)
+    
+    /* SDP Parsing */
+    PHP_ME(ExoSip, parseSdp, arginfo_exosip_parsesdp, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     
     /* Master-Worker-Task */
     PHP_ME(ExoSip, addTask, arginfo_exosip_addtask, ZEND_ACC_PUBLIC)

@@ -391,7 +391,7 @@ void sip_cleanup_expired_connections(SipContext *ctx, int timeout_seconds) {
 // ==================== 会话管理 ====================
 
 int sip_create_session(SipContext *ctx, int conn_id, SessionType type) {
-    if (!ctx || conn_id <= 0) return -1;
+    if (!ctx) return -1;
     
     pthread_mutex_lock(&ctx->lock);
     
@@ -727,22 +727,30 @@ int sip_send_message_response(SipContext *ctx, int tid, int code, const char *bo
     return exosip_send_response_wrapper(ctx, tid, code, NULL, NULL);
 }
 
-int sip_send_invite(SipContext *ctx, const char *target_uri, const char *sdp_body) {
-    // TODO: 实现同步发送INVITE
-    fprintf(stderr, "[WARN] sip_send_invite not yet implemented with sync send\n");
-    return -1;
-}
-
-int sip_send_bye(SipContext *ctx, int call_id, int dialog_id) {
-    // TODO: 实现同步发送BYE
-    fprintf(stderr, "[WARN] sip_send_bye not yet implemented with sync send\n");
-    return -1;
-}
-
 int sip_send_ack(SipContext *ctx, int dialog_id) {
-    // TODO: 实现同步发送ACK
-    fprintf(stderr, "[WARN] sip_send_ack not yet implemented with sync send\n");
-    return -1;
+    if (!ctx || dialog_id < 0) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    if (debug) fprintf(stderr, "[DEBUG] Sending ACK: dialog_id=%d\n", dialog_id);
+    
+    eXosip_lock(ctx->ctx);
+    
+    // 使用 eXosip_call_send_ack 发送 ACK
+    int ret = eXosip_call_send_ack(ctx->ctx, dialog_id, NULL);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret < 0) {
+        if (debug) fprintf(stderr, "[DEBUG] Failed to send ACK: ret=%d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ACK sent successfully\n");
+    
+    return 0;
 }
 
 int sip_send_message(SipContext *ctx, const char *target_uri, const char *content_type, const char *body) {
@@ -848,138 +856,136 @@ int sip_send_keepalive_response(SipContext *ctx, int tid) {
     return sip_send_message_response(ctx, tid, 200, NULL);
 }
 
-// ==================== 事件处理 ====================
+// ==================== INVITE/BYE 支持 ====================
 
-// ==================== 旧的事件线程实现（已废弃） ====================
-// 注意：此函数基于独立事件线程模式，已被单线程事件循环替代
-// 现在使用 PHP run() 方法中的事件循环，不再需要独立线程
-
-#if 0  // 废弃代码，保留用于参考
-void* sip_event_thread(void *arg) {
-    SipContext *ctx = (SipContext*)arg;
-    int debug = ctx->server_info.debug;
-    
-    if (debug) fprintf(stderr, "[DEBUG] Event thread started\n");
-    
-    while (ctx->running) {
-        eXosip_event_t *evt = eXosip_event_wait(ctx->ctx, 0, 20);
-        
-        eXosip_lock(ctx->ctx);
-        eXosip_automatic_action(ctx->ctx);
-        eXosip_unlock(ctx->ctx);
-        
-        if (evt) {
-            if (debug) fprintf(stderr, "[DEBUG] Event: type=%d, tid=%d\n", evt->type, evt->tid);
-            handle_sip_event(ctx, evt);
-            eXosip_event_free(evt);
-        }
-        
-        Task *task;
-        while ((task = task_queue_try_pop(&ctx->task_queue)) != NULL) {
-            switch (task->type) {
-                case TASK_SEND_MESSAGE: {
-                    osip_message_t *msg = NULL;
-                    eXosip_lock(ctx->ctx);
-                    int ret = eXosip_message_build_request(ctx->ctx, &msg, "MESSAGE", 
-                                                          task->target_uri, task->from_uri, NULL);
-                    if (ret == 0 && msg) {
-                        osip_message_set_body(msg, task->body, strlen(task->body));
-                        osip_message_set_content_type(msg, task->content_type);
-                        eXosip_message_send_request(ctx->ctx, msg);
-                    }
-                    eXosip_unlock(ctx->ctx);
-                    break;
-                }
-                case TASK_SEND_MESSAGE_RESPONSE: {
-                    osip_message_t *resp = NULL;
-                    eXosip_lock(ctx->ctx);
-                    int ret = eXosip_message_build_answer(ctx->ctx, task->tid, task->code, &resp);
-                    if (ret == 0 && resp) {
-                        if (task->body[0] != '\0') {
-                            osip_message_set_body(resp, task->body, strlen(task->body));
-                            osip_message_set_content_type(resp, "Application/MANSCDP+xml");
-                        }
-                        // 添加自定义headers（如WWW-Authenticate）
-                        if (task->headers[0] != '\0') {
-                            // 格式："WWW-Authenticate: Digest realm=..."
-                            if (strstr(task->headers, "WWW-Authenticate:") != NULL) {
-                                const char *value = strchr(task->headers, ':');
-                                if (value) {
-                                    value++; // 跳过':'
-                                    while (*value == ' ') value++; // 跳过空格
-                                    osip_message_set_www_authenticate(resp, value);
-                                }
-                            } else if (strstr(task->headers, "Expires:") != NULL) {
-                                const char *value = strchr(task->headers, ':');
-                                if (value) {
-                                    value++;
-                                    while (*value == ' ') value++;
-                                    osip_message_set_expires(resp, value);
-                                }
-                            }
-                        }
-                        eXosip_message_send_answer(ctx->ctx, task->tid, task->code, resp);
-                    }
-                    eXosip_unlock(ctx->ctx);
-                    break;
-                }
-                case TASK_SEND_REGISTER_RESPONSE: {
-                    osip_message_t *resp = NULL;
-                    eXosip_lock(ctx->ctx);
-                    eXosip_message_build_answer(ctx->ctx, task->tid, task->code, &resp);
-                    if (resp) {
-                        if (task->code == 401 && task->body[0] != '\0') {
-                            osip_message_set_www_authenticate(resp, task->body);
-                        }
-                        eXosip_message_send_answer(ctx->ctx, task->tid, task->code, resp);
-                    }
-                    eXosip_unlock(ctx->ctx);
-                    break;
-                }
-                case TASK_SEND_INVITE: {
-                    osip_message_t *inv = NULL;
-                    eXosip_lock(ctx->ctx);
-                    int cid = eXosip_call_build_initial_invite(ctx->ctx, &inv, 
-                                                              task->target_uri, task->from_uri, NULL, NULL);
-                    if (cid >= 0 && inv) {
-                        if (task->body[0] != '\0') {
-                            osip_message_set_body(inv, task->body, strlen(task->body));
-                            osip_message_set_content_type(inv, "application/sdp");
-                        }
-                        eXosip_call_send_initial_invite(ctx->ctx, inv);
-                    }
-                    eXosip_unlock(ctx->ctx);
-                    break;
-                }
-                case TASK_SEND_BYE: {
-                    eXosip_lock(ctx->ctx);
-                    eXosip_call_terminate(ctx->ctx, task->call_id, task->dialog_id);
-                    eXosip_unlock(ctx->ctx);
-                    break;
-                }
-                case TASK_SEND_ACK: {
-                    osip_message_t *ack = NULL;
-                    eXosip_lock(ctx->ctx);
-                    int ret = eXosip_call_build_ack(ctx->ctx, task->dialog_id, &ack);
-                    if (ret == 0 && ack) {
-                        eXosip_call_send_ack(ctx->ctx, task->dialog_id, ack);
-                    }
-                    eXosip_unlock(ctx->ctx);
-                    break;
-                }
-                default:
-                    break;
-            }
-            free(task);
-        }
-        
-        if (!evt) usleep(1000);
+/**
+ * 发送 INVITE 请求 (用于实时视频、录像回放等)
+ * 
+ * @param ctx SIP 上下文
+ * @param to_uri 目标 URI (如: sip:34020000001320000001@192.168.1.101:5060)
+ * @param sdp SDP 内容
+ * @param subject Subject 头 (如: channelId:channelId,serverId:0)
+ * @return call_id (>= 0 成功, < 0 失败)
+ */
+int sip_send_invite(SipContext *ctx, const char *to_uri, const char *sdp, const char *subject) {
+    if (!ctx || !to_uri || !sdp) {
+        return -1;
     }
     
-    if (debug) fprintf(stderr, "[DEBUG] Event thread stopped\n");
-    return NULL;
+    int debug = ctx->server_info.debug;
+    
+    // 构建 From URI
+    char from_uri[256];
+    if (ctx->server_info.sipRealm && strlen(ctx->server_info.sipRealm) > 0) {
+        snprintf(from_uri, sizeof(from_uri), "sip:%s@%s", 
+                 ctx->server_info.sipId, ctx->server_info.sipRealm);
+    } else {
+        const char *from_ip = (strlen(ctx->local_ip) > 0) ? ctx->local_ip : ctx->server_info.ip;
+        snprintf(from_uri, sizeof(from_uri), "sip:%s@%s:%d", 
+                 ctx->server_info.sipId, from_ip, ctx->server_info.port);
+    }
+    
+    if (debug) {
+        fprintf(stderr, "[DEBUG] ========== INVITE REQUEST ==========\n");
+        fprintf(stderr, "[DEBUG] From URI: %s\n", from_uri);
+        fprintf(stderr, "[DEBUG] To URI: %s\n", to_uri);
+        fprintf(stderr, "[DEBUG] Subject: %s\n", subject ? subject : "(none)");
+        fprintf(stderr, "[DEBUG] SDP Length: %zu bytes\n", strlen(sdp));
+        fprintf(stderr, "[DEBUG] SDP Content:\n%s\n", sdp);
+        fprintf(stderr, "[DEBUG] ====================================\n");
+    }
+    
+    osip_message_t *invite = NULL;
+    eXosip_lock(ctx->ctx);
+    
+    // 构建 INVITE 请求
+    int call_id = eXosip_call_build_initial_invite(ctx->ctx, &invite, to_uri, from_uri, NULL, NULL);
+    
+    if (call_id < 0 || !invite) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build INVITE: call_id=%d\n", call_id);
+        eXosip_unlock(ctx->ctx);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] INVITE message built: call_id=%d\n", call_id);
+    
+    // 添加 SDP body
+    if (sdp && strlen(sdp) > 0) {
+        int sdp_ret = osip_message_set_body(invite, sdp, strlen(sdp));
+        if (sdp_ret != 0) {
+            if (debug) fprintf(stderr, "[ERROR] Failed to set SDP body: ret=%d\n", sdp_ret);
+        }
+        osip_message_set_content_type(invite, "application/sdp");
+    }
+    
+    // 添加 Subject 头
+    if (subject && strlen(subject) > 0) {
+        osip_message_set_subject(invite, subject);
+    }
+    
+    // 打印完整的 SIP 消息 (用于调试)
+    if (debug) {
+        char *sip_msg_str = NULL;
+        size_t sip_msg_len = 0;
+        osip_message_to_str(invite, &sip_msg_str, &sip_msg_len);
+        if (sip_msg_str) {
+            fprintf(stderr, "[DEBUG] Complete SIP INVITE message:\n%s\n", sip_msg_str);
+            osip_free(sip_msg_str);
+        }
+    }
+    
+    // 发送 INVITE
+    int ret = eXosip_call_send_initial_invite(ctx->ctx, invite);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret < 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send INVITE: eXosip_call_send_initial_invite returned %d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ INVITE sent successfully: call_id=%d, transaction_id=%d\n", call_id, ret);
+    
+    return call_id;
 }
-#endif  // 废弃代码结束
+
+/**
+ * 发送 BYE 请求 (终止会话)
+ * 
+ * @param ctx SIP 上下文
+ * @param call_id Call ID (由 sendInvite 返回)
+ * @param dialog_id Dialog ID (通常与 call_id 相同,或从事件中获取)
+ * @return 0 成功, -1 失败
+ */
+int sip_send_bye(SipContext *ctx, int call_id, int dialog_id) {
+    if (!ctx || call_id < 0) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    if (debug) fprintf(stderr, "[DEBUG] Sending BYE: call_id=%d, dialog_id=%d\n", call_id, dialog_id);
+    
+    eXosip_lock(ctx->ctx);
+    
+    // 如果 dialog_id < 0, 使用 call_id 终止所有对话
+    int ret = eXosip_call_terminate(ctx->ctx, call_id, dialog_id >= 0 ? dialog_id : -1);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret < 0) {
+        if (debug) fprintf(stderr, "[DEBUG] Failed to send BYE: ret=%d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] BYE sent successfully\n");
+    
+    return 0;
+}
+
+// ==================== 事件处理 ====================
+
+
 
 void handle_sip_event(SipContext *ctx, eXosip_event_t *evt) {
     if (!ctx || !evt) return;
@@ -1106,6 +1112,7 @@ void sip_event_to_php_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionIn
         }
     }
     
+    // 确保 status_code 始终被设置
     if (evt->response) {
         char *msg_str = NULL;
         size_t msg_len = 0;
@@ -1116,9 +1123,14 @@ void sip_event_to_php_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionIn
         }
         
         add_assoc_long(arr, "status_code", evt->response->status_code);
+        add_assoc_long(arr, "code", evt->response->status_code);
         if (evt->response->reason_phrase) {
             add_assoc_string(arr, "reason_phrase", evt->response->reason_phrase);
         }
+    } else {
+        // 对于请求事件或无响应的事件,设置默认值0
+        add_assoc_long(arr, "status_code", 0);
+        add_assoc_long(arr, "code", 0);
     }
     
     // 连接信息
@@ -1132,6 +1144,13 @@ void sip_event_to_php_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionIn
     if (session) {
         zval session_arr;
         session_to_php_array(session, &session_arr);
+        add_assoc_zval(arr, "session", &session_arr);
+    } else {
+        // 如果没有传入 session，尝试从 evt 中提取 Call-ID 和 Dialog-ID
+        zval session_arr;
+        array_init(&session_arr);
+        add_assoc_long(&session_arr, "call_id", evt->cid);
+        add_assoc_long(&session_arr, "dialog_id", evt->did);
         add_assoc_zval(arr, "session", &session_arr);
     }
     
@@ -1322,7 +1341,47 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
     int tv_ms = timeout_ms % 1000;
 
     while ((evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms)) != NULL) {
-        if (debug) fprintf(stderr, "[DEBUG] Event: type=%d, tid=%d\n", evt->type, evt->tid);
+        // 详细的事件调试信息
+        if (debug) {
+            const char *event_type_name = "UNKNOWN";
+            switch (evt->type) {
+                case EXOSIP_MESSAGE_NEW: event_type_name = "MESSAGE_NEW"; break;
+                case EXOSIP_CALL_INVITE: event_type_name = "CALL_INVITE"; break;
+                case EXOSIP_CALL_PROCEEDING: event_type_name = "CALL_PROCEEDING (100 Trying)"; break;
+                case EXOSIP_CALL_RINGING: event_type_name = "CALL_RINGING (180 Ringing)"; break;
+                case EXOSIP_CALL_ANSWERED: event_type_name = "CALL_ANSWERED (200 OK)"; break;
+                case EXOSIP_CALL_CLOSED: event_type_name = "CALL_CLOSED"; break;
+                case EXOSIP_CALL_REQUESTFAILURE: event_type_name = "CALL_REQUESTFAILURE"; break;
+                case EXOSIP_CALL_SERVERFAILURE: event_type_name = "CALL_SERVERFAILURE"; break;
+                case EXOSIP_CALL_GLOBALFAILURE: event_type_name = "CALL_GLOBALFAILURE"; break;
+            }
+            fprintf(stderr, "[DEBUG] Event received: type=%d (%s), tid=%d, cid=%d, did=%d\n", 
+                    evt->type, event_type_name, evt->tid, evt->cid, evt->did);
+            
+            // 如果有响应消息,打印状态码
+            if (evt->response) {
+                fprintf(stderr, "[DEBUG]   Response status: %d %s\n", 
+                        evt->response->status_code, 
+                        evt->response->reason_phrase ? evt->response->reason_phrase : "");
+                
+                // 打印完整响应消息(仅在 CALL_ANSWERED 时)
+                if (evt->type == EXOSIP_CALL_ANSWERED) {
+                    char *resp_str = NULL;
+                    size_t resp_len = 0;
+                    osip_message_to_str(evt->response, &resp_str, &resp_len);
+                    if (resp_str) {
+                        fprintf(stderr, "[DEBUG]   Full response:\n%s\n", resp_str);
+                        osip_free(resp_str);
+                    }
+                }
+            }
+            
+            // 如果有请求消息,打印方法
+            if (evt->request) {
+                fprintf(stderr, "[DEBUG]   Request method: %s\n", 
+                        evt->request->sip_method ? evt->request->sip_method : "");
+            }
+        }
         
         // 处理标准SIP自动响应（401/407/3xx等）
         eXosip_lock(ctx->ctx);
@@ -1709,6 +1768,15 @@ void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn,
     add_assoc_long(event_array, "ss_status", evt->ss_status);
     add_assoc_long(event_array, "ss_reason", evt->ss_reason);
     
+    // 修复: 添加 status_code 字段
+    if (evt->response) {
+        add_assoc_long(event_array, "status_code", evt->response->status_code);
+        add_assoc_long(event_array, "code", evt->response->status_code);
+    } else {
+        add_assoc_long(event_array, "status_code", 0);
+        add_assoc_long(event_array, "code", 0);
+    }
+    
     // 提取Expires头（用于区分注册和注销）
     int expires = -1;
     osip_message_t *msg = evt->request ? evt->request : evt->response;
@@ -1755,20 +1823,36 @@ void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn,
     const char *body = NULL;
     const char *content_type = NULL;
     
-    // msg 已在上面定义，复用
-    if (msg) {
+    // 优先从响应中提取body（对于200 OK等响应事件）
+    // 如果没有响应，则从请求中提取（对于INVITE等请求事件）
+    osip_message_t *body_msg = evt->response ? evt->response : evt->request;
+    fprintf(stderr, "[C-DEBUG] body_msg source: %s (evt->type=%d)\n", 
+            evt->response ? "response" : (evt->request ? "request" : "NULL"), evt->type);
+    
+    if (body_msg) {
         // 使用标准osip API获取body
         osip_body_t *osip_body = NULL;
-        if (osip_message_get_body(msg, 0, &osip_body) == 0 && osip_body && osip_body->body) {
+        int ret = osip_message_get_body(body_msg, 0, &osip_body);
+        fprintf(stderr, "[C-DEBUG] osip_message_get_body returned: %d\n", ret);
+        
+        if (ret == 0 && osip_body && osip_body->body) {
             body = osip_body->body;
+            fprintf(stderr, "[C-DEBUG] Body extracted: %.50s... (length=%zu)\n", 
+                    body, strlen(body));
+        } else {
+            fprintf(stderr, "[C-DEBUG] No body found (ret=%d, osip_body=%p)\n", 
+                    ret, (void*)osip_body);
         }
         
         // 获取Content-Type
-        osip_content_type_t *ct = osip_message_get_content_type(msg);
+        osip_content_type_t *ct = osip_message_get_content_type(body_msg);
         if (ct && ct->type && ct->subtype) {
             static char ct_buffer[256];
             snprintf(ct_buffer, sizeof(ct_buffer), "%s/%s", ct->type, ct->subtype);
             content_type = ct_buffer;
+            fprintf(stderr, "[C-DEBUG] Content-Type extracted: %s\n", content_type);
+        } else {
+            fprintf(stderr, "[C-DEBUG] No Content-Type found (ct=%p)\n", (void*)ct);
         }
     }
     
@@ -2541,11 +2625,16 @@ int client_process_events(ClientContext *ctx, int timeout_ms, zval *events_array
         add_assoc_long(&event_item, "cid", evt->cid);
         add_assoc_long(&event_item, "rid", evt->rid);
         
+        // 确保 status_code 始终被设置
         if (evt->response) {
-            add_assoc_long(&event_item, "status_code", evt->response->status_code);
+            int status_code = evt->response->status_code;
+            add_assoc_long(&event_item, "status_code", status_code);
             if (evt->response->reason_phrase) {
                 add_assoc_string(&event_item, "reason", evt->response->reason_phrase);
             }
+        } else {
+            // 对于请求事件或无响应的事件,设置默认值0
+            add_assoc_long(&event_item, "status_code", 0);
         }
         
         if (evt->request && evt->request->sip_method) {

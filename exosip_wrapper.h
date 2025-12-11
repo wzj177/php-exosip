@@ -365,7 +365,7 @@ void sip_cleanup_expired_sessions(SipContext *ctx, int timeout_seconds);
 // 消息发送
 int sip_send_register_response(SipContext *ctx, int tid, int code, const char *auth_header);
 int sip_send_message_response(SipContext *ctx, int tid, int code, const char *body);
-int sip_send_invite(SipContext *ctx, const char *target_uri, const char *sdp_body);
+int sip_send_invite(SipContext *ctx, const char *to_uri, const char *sdp, const char *subject);
 int sip_send_bye(SipContext *ctx, int call_id, int dialog_id);
 int sip_send_ack(SipContext *ctx, int dialog_id);
 int sip_send_message(SipContext *ctx, const char *target_uri, const char *content_type, const char *body);
