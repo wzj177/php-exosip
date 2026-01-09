@@ -116,6 +116,28 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_parsesdp, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, sdp_body, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+/* SUBSCRIBE/NOTIFY arginfo */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_subscribe, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, toUri, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, eventType, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, expires, IS_LONG, 1)
+    ZEND_ARG_TYPE_INFO(0, xmlBody, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_refreshsubscribe, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, subscriptionId, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, expires, IS_LONG, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_cancelsubscribe, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, subscriptionId, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendnotifyresponse, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, tid, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, code, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 /* SipEvent class arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipevent_gettype, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -467,7 +489,7 @@ PHP_METHOD(SipEvent, getRequestUri) {
 
 PHP_METHOD(SipEvent, getBody) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
-    fprintf(stderr, "[PHP-DEBUG] getBody called: obj=%p, body=%p\n", obj, obj->body);
+    // fprintf(stderr, "[PHP-DEBUG] getBody called: obj=%p, body=%p\n", obj, obj->body);
     if (obj->body) {
         RETURN_STRING(obj->body);
     }
@@ -1667,16 +1689,16 @@ PHP_METHOD(ExoSip, run) {
                                 // 检查是否有异常产生
                                 if (EG(exception)) {
                                     // 获取异常信息
-                                    zval *exception = EG(exception);
+                                    zend_object *exception_obj = EG(exception);
                                     char error_buffer[1024];
                                     const char *error_msg = "Unknown error";
                                     
-                                    if (exception && Z_TYPE_P(exception) == IS_OBJECT) {
-                                        zend_class_entry *ce = Z_OBJCE_P(exception);
+                                    if (exception_obj) {
+                                        zend_class_entry *ce = exception_obj->ce;
                                         
                                         // 尝试获取异常消息
                                         zval rv;
-                                        zval *message = zend_read_property(ce, Z_OBJ_P(exception), "message", sizeof("message")-1, 0, &rv);
+                                        zval *message = zend_read_property(ce, exception_obj, "message", sizeof("message")-1, 0, &rv);
                                         
                                         if (message && Z_TYPE_P(message) == IS_STRING && Z_STRLEN_P(message) > 0) {
                                             snprintf(error_buffer, sizeof(error_buffer), "%s: %s", 
@@ -1688,8 +1710,8 @@ PHP_METHOD(ExoSip, run) {
                                         }
                                         
                                         // 如果有文件和行号信息,也包含进来
-                                        zval *file = zend_read_property(ce, Z_OBJ_P(exception), "file", sizeof("file")-1, 0, &rv);
-                                        zval *line = zend_read_property(ce, Z_OBJ_P(exception), "line", sizeof("line")-1, 0, &rv);
+                                        zval *file = zend_read_property(ce, exception_obj, "file", sizeof("file")-1, 0, &rv);
+                                        zval *line = zend_read_property(ce, exception_obj, "line", sizeof("line")-1, 0, &rv);
                                         
                                         if (file && Z_TYPE_P(file) == IS_STRING && line && Z_TYPE_P(line) == IS_LONG) {
                                             char temp_buffer[1024];
@@ -2486,6 +2508,95 @@ PHP_METHOD(ExoSip, sendResponse) {
     RETURN_BOOL(result == 0);
 }
 
+/* ========== ExoSip::subscribe(string $toUri, string $eventType, int $expires, string $xmlBody) ========== */
+PHP_METHOD(ExoSip, subscribe) {
+    char *to_uri, *event_type, *xml_body = NULL;
+    size_t to_uri_len, event_type_len, xml_body_len = 0;
+    zend_long expires = 3600;
+    
+    ZEND_PARSE_PARAMETERS_START(2, 4)
+        Z_PARAM_STRING(to_uri, to_uri_len)
+        Z_PARAM_STRING(event_type, event_type_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(expires)
+        Z_PARAM_STRING(xml_body, xml_body_len)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    int subscription_id = sip_send_subscribe(obj->ctx, to_uri, event_type, (int)expires, xml_body);
+    
+    if (subscription_id < 0) {
+        RETURN_FALSE;
+    }
+    
+    RETURN_LONG(subscription_id);
+}
+
+/* ========== ExoSip::refreshSubscribe(int $subscriptionId, int $expires) ========== */
+PHP_METHOD(ExoSip, refreshSubscribe) {
+    zend_long subscription_id, expires = 3600;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(subscription_id)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(expires)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    int result = sip_refresh_subscribe(obj->ctx, (int)subscription_id, (int)expires);
+    
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::cancelSubscribe(int $subscriptionId) ========== */
+PHP_METHOD(ExoSip, cancelSubscribe) {
+    zend_long subscription_id;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(subscription_id)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    int result = sip_cancel_subscribe(obj->ctx, (int)subscription_id);
+    
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::sendNotifyResponse(int $tid, int $code) ========== */
+PHP_METHOD(ExoSip, sendNotifyResponse) {
+    zend_long tid, code;
+    
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_LONG(tid)
+        Z_PARAM_LONG(code)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    int result = sip_send_notify_response(obj->ctx, (int)tid, (int)code);
+    
+    RETURN_BOOL(result == 0);
+}
+
 /* ========== ExoSip::getFd() - 获取socket文件描述符用于外部事件循环 ========== */
 PHP_METHOD(ExoSip, getFd) {
     php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
@@ -3203,6 +3314,12 @@ const zend_function_entry exosip_methods[] = {
     PHP_ME(ExoSip, sendBye, arginfo_exosip_sendbye, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendAck, arginfo_exosip_sendack, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendResponse, arginfo_exosip_sendresponse, ZEND_ACC_PUBLIC)
+    
+    /* SUBSCRIBE/NOTIFY support */
+    PHP_ME(ExoSip, subscribe, arginfo_exosip_subscribe, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, refreshSubscribe, arginfo_exosip_refreshsubscribe, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, cancelSubscribe, arginfo_exosip_cancelsubscribe, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendNotifyResponse, arginfo_exosip_sendnotifyresponse, ZEND_ACC_PUBLIC)
     
     /* Configuration and statistics */
     PHP_ME(ExoSip, setConfig, arginfo_exosip_setconfig, ZEND_ACC_PUBLIC)

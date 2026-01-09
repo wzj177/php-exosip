@@ -983,6 +983,231 @@ int sip_send_bye(SipContext *ctx, int call_id, int dialog_id) {
     return 0;
 }
 
+// ==================== SUBSCRIBE/NOTIFY 支持 (GB28181) ====================
+
+/**
+ * 发送 SUBSCRIBE 请求（订阅事件）
+ * 
+ * GB28181 订阅类型:
+ * - Catalog: 设备目录变更通知
+ * - Alarm: 报警事件通知
+ * - MobilePosition: 移动位置上报
+ * 
+ * @param ctx SIP 上下文
+ * @param to_uri 目标 URI (如: sip:34020000001320000001@192.168.1.101:5060)
+ * @param event_type 事件类型 (Catalog, Alarm, MobilePosition)
+ * @param expires 订阅有效期（秒），0 表示取消订阅
+ * @param xml_body XML 消息体（GB28181 查询 XML）
+ * @return subscription_id >= 0 成功, < 0 失败
+ */
+int sip_send_subscribe(SipContext *ctx, const char *to_uri, const char *event_type, 
+                       int expires, const char *xml_body) {
+    if (!ctx || !to_uri || !event_type) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    // 构建 From URI
+    char from_uri[256];
+    if (ctx->server_info.sipRealm && strlen(ctx->server_info.sipRealm) > 0) {
+        snprintf(from_uri, sizeof(from_uri), "sip:%s@%s", 
+                 ctx->server_info.sipId, ctx->server_info.sipRealm);
+    } else {
+        const char *from_ip = (strlen(ctx->local_ip) > 0) ? ctx->local_ip : ctx->server_info.ip;
+        snprintf(from_uri, sizeof(from_uri), "sip:%s@%s:%d", 
+                 ctx->server_info.sipId, from_ip, ctx->server_info.port);
+    }
+    
+    if (debug) {
+        fprintf(stderr, "[DEBUG] ========== SUBSCRIBE REQUEST ==========\n");
+        fprintf(stderr, "[DEBUG] From URI: %s\n", from_uri);
+        fprintf(stderr, "[DEBUG] To URI: %s\n", to_uri);
+        fprintf(stderr, "[DEBUG] Event: %s\n", event_type);
+        fprintf(stderr, "[DEBUG] Expires: %d seconds\n", expires);
+        if (xml_body) {
+            fprintf(stderr, "[DEBUG] XML Body:\n%s\n", xml_body);
+        }
+        fprintf(stderr, "[DEBUG] ==========================================\n");
+    }
+    
+    osip_message_t *subscribe = NULL;
+    eXosip_lock(ctx->ctx);
+    
+    // 构建 SUBSCRIBE 请求
+    // eXosip_subscription_build_initial_subscribe 参数:
+    // ctx, &msg, to, from, route, event, expires
+    int ret = eXosip_subscription_build_initial_subscribe(
+        ctx->ctx, 
+        &subscribe, 
+        to_uri, 
+        from_uri, 
+        NULL,           // route
+        event_type,     // event header
+        expires         // expires
+    );
+    
+    if (ret < 0 || !subscribe) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build SUBSCRIBE: ret=%d\n", ret);
+        eXosip_unlock(ctx->ctx);
+        return -1;
+    }
+    
+    // 添加 XML body（如果有）
+    if (xml_body && strlen(xml_body) > 0) {
+        osip_message_set_body(subscribe, xml_body, strlen(xml_body));
+        osip_message_set_content_type(subscribe, "Application/MANSCDP+xml");
+    }
+    
+    // 打印完整的 SIP 消息（调试用）
+    if (debug) {
+        char *sip_msg_str = NULL;
+        size_t sip_msg_len = 0;
+        osip_message_to_str(subscribe, &sip_msg_str, &sip_msg_len);
+        if (sip_msg_str) {
+            fprintf(stderr, "[DEBUG] Complete SIP SUBSCRIBE message:\n%s\n", sip_msg_str);
+            osip_free(sip_msg_str);
+        }
+    }
+    
+    // 发送 SUBSCRIBE
+    int sid = eXosip_subscription_send_initial_request(ctx->ctx, subscribe);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (sid < 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send SUBSCRIBE: sid=%d\n", sid);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ SUBSCRIBE sent successfully: subscription_id=%d\n", sid);
+    
+    // 注意：订阅信息存储已移至 PHP 层（SubscriptionManager + Redis）
+    // C 层只返回 subscription_id，由 PHP 层负责保存和管理
+    
+    return sid;
+}
+
+/**
+ * 刷新订阅（续订）
+ */
+int sip_refresh_subscribe(SipContext *ctx, int subscription_id, int expires) {
+    if (!ctx || subscription_id < 0) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    if (debug) {
+        fprintf(stderr, "[DEBUG] Refreshing subscription: sid=%d, expires=%d\n", 
+                subscription_id, expires);
+    }
+    
+    // 注意：订阅管理已移至 PHP/Redis 层
+    // subscription_id 在新架构中就是 dialog_id（由 sip_send_subscribe 返回）
+    int dialog_id = subscription_id;
+    
+    osip_message_t *subscribe = NULL;
+    eXosip_lock(ctx->ctx);
+    
+    // 构建刷新 SUBSCRIBE
+    int ret = eXosip_subscription_build_refresh_request(
+        ctx->ctx, 
+        dialog_id, 
+        &subscribe
+    );
+    
+    if (ret < 0 || !subscribe) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build refresh SUBSCRIBE: ret=%d\n", ret);
+        eXosip_unlock(ctx->ctx);
+        return -1;
+    }
+    
+    // 设置新的 Expires
+    char expires_str[32];
+    snprintf(expires_str, sizeof(expires_str), "%d", expires);
+    osip_message_set_expires(subscribe, expires_str);
+    
+    // 发送刷新 SUBSCRIBE
+    ret = eXosip_subscription_send_refresh_request(ctx->ctx, dialog_id, subscribe);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret < 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send refresh SUBSCRIBE: ret=%d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ Subscription refreshed: sid=%d\n", subscription_id);
+    
+    return 0;
+}
+
+/**
+ * 取消订阅
+ * 注意：订阅管理已移至 PHP/Redis 层，subscription_id 就是 dialog_id
+ */
+int sip_cancel_subscribe(SipContext *ctx, int subscription_id) {
+    // 取消订阅就是发送 expires=0 的 SUBSCRIBE
+    return sip_refresh_subscribe(ctx, subscription_id, 0);
+}
+
+/**
+ * 发送 NOTIFY 响应
+ */
+int sip_send_notify_response(SipContext *ctx, int tid, int code) {
+    if (!ctx || tid <= 0) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    if (debug) {
+        fprintf(stderr, "[DEBUG] Sending NOTIFY response: tid=%d, code=%d\n", tid, code);
+    }
+    
+    osip_message_t *answer = NULL;
+    eXosip_lock(ctx->ctx);
+    
+    // 对于 NOTIFY，使用 eXosip_insubscription_build_answer
+    int ret = eXosip_insubscription_build_answer(ctx->ctx, tid, code, &answer);
+    
+    if (ret == 0 && answer) {
+        ret = eXosip_insubscription_send_answer(ctx->ctx, tid, code, answer);
+    }
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret < 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send NOTIFY response: ret=%d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ NOTIFY response sent: tid=%d, code=%d\n", tid, code);
+    
+    return 0;
+}
+
+// ==================== 废弃函数：订阅查询和管理已移至 PHP 层 ====================
+// 以下函数已被 SubscriptionManager（PHP + Redis）替代
+// 原因：
+// 1. C 层 MAX_SUBSCRIPTIONS 限制 1024 个订阅，PHP/Redis 无限制
+// 2. C 层内存存储，进程重启丢失；Redis 持久化
+// 3. C 层 O(n) 查找；Redis O(1) 哈希查找
+// 4. C 层不支持分布式；Redis 支持多节点共享
+//
+// 迁移指南：
+// - sip_get_subscription() → $subscriptionManager->getSubscription($deviceId, $eventType)
+// - sip_find_subscription() → $subscriptionManager->getSubscription($deviceId, $eventType)
+// - sip_get_all_subscriptions() → $subscriptionManager->getAllSubscriptions()
+// - sip_cleanup_expired_subscriptions() → $subscriptionManager->cleanupExpired()
+//
+// C 层保留的功能（需要 eXosip dialog_id）：
+// - sip_send_subscribe() - 发送 SUBSCRIBE 请求
+// - sip_refresh_subscribe() - 刷新订阅（需要 dialog_id）
+// - sip_cancel_subscribe() - 取消订阅（需要 dialog_id）
+// - sip_send_notify_response() - 响应 NOTIFY 请求
+
 // ==================== 事件处理 ====================
 
 
@@ -1345,7 +1570,16 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
         if (debug) {
             const char *event_type_name = "UNKNOWN";
             switch (evt->type) {
+                // MESSAGE events
                 case EXOSIP_MESSAGE_NEW: event_type_name = "MESSAGE_NEW"; break;
+                case EXOSIP_MESSAGE_PROCEEDING: event_type_name = "MESSAGE_PROCEEDING (1xx)"; break;
+                case EXOSIP_MESSAGE_ANSWERED: event_type_name = "MESSAGE_ANSWERED (200 OK)"; break;
+                case EXOSIP_MESSAGE_REDIRECTED: event_type_name = "MESSAGE_REDIRECTED (3xx)"; break;
+                case EXOSIP_MESSAGE_REQUESTFAILURE: event_type_name = "MESSAGE_REQUESTFAILURE (4xx)"; break;
+                case EXOSIP_MESSAGE_SERVERFAILURE: event_type_name = "MESSAGE_SERVERFAILURE (5xx)"; break;
+                case EXOSIP_MESSAGE_GLOBALFAILURE: event_type_name = "MESSAGE_GLOBALFAILURE (6xx)"; break;
+                
+                // CALL events
                 case EXOSIP_CALL_INVITE: event_type_name = "CALL_INVITE"; break;
                 case EXOSIP_CALL_PROCEEDING: event_type_name = "CALL_PROCEEDING (100 Trying)"; break;
                 case EXOSIP_CALL_RINGING: event_type_name = "CALL_RINGING (180 Ringing)"; break;
@@ -1354,6 +1588,12 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
                 case EXOSIP_CALL_REQUESTFAILURE: event_type_name = "CALL_REQUESTFAILURE"; break;
                 case EXOSIP_CALL_SERVERFAILURE: event_type_name = "CALL_SERVERFAILURE"; break;
                 case EXOSIP_CALL_GLOBALFAILURE: event_type_name = "CALL_GLOBALFAILURE"; break;
+                case EXOSIP_CALL_ACK: event_type_name = "CALL_ACK"; break;
+                case EXOSIP_CALL_CANCELLED: event_type_name = "CALL_CANCELLED"; break;
+                
+                // REGISTRATION events
+                case EXOSIP_REGISTRATION_SUCCESS: event_type_name = "REGISTRATION_SUCCESS"; break;
+                case EXOSIP_REGISTRATION_FAILURE: event_type_name = "REGISTRATION_FAILURE"; break;
             }
             fprintf(stderr, "[DEBUG] Event received: type=%d (%s), tid=%d, cid=%d, did=%d\n", 
                     evt->type, event_type_name, evt->tid, evt->cid, evt->did);

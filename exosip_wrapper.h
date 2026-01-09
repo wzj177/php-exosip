@@ -54,6 +54,20 @@ typedef struct _device_info {
     int channel;
 } DeviceInfo;
 
+// 订阅信息结构（仅用于返回值，实际存储在 PHP/Redis 层）
+typedef struct _subscription_info {
+    int subscription_id;          // 订阅 ID (sid)
+    int dialog_id;                // 对话 ID
+    char device_id[64];           // 设备 ID
+    char event_type[32];          // 事件类型
+    int expires;                  // 有效期（秒）
+    time_t created_at;            // 创建时间
+    time_t last_refresh;          // 上次刷新时间
+    time_t next_refresh;          // 下次刷新时间
+} SubscriptionInfo;
+
+// 注意：订阅管理已移至 PHP 层（Redis 存储），C 层仅负责 SIP 协议操作
+
 // SIP事件类型增强
 typedef enum {
     SIP_EVENT_REGISTER = 1,
@@ -98,6 +112,8 @@ typedef enum {
     GB_CMD_PTZ_CONTROL,
     GB_CMD_RECORD_INFO,
     GB_CMD_ALARM,
+    GB_CMD_SUBSCRIBE,
+    GB_CMD_NOTIFY,
     GB_CMD_CONFIG_DOWNLOAD,
     GB_CMD_PRESET_QUERY
 } GB28181CmdType;
@@ -278,6 +294,9 @@ typedef struct _sip_context {
     unsigned long pipe_msg_counter;  // 管道消息计数器
     int task_sockfd;                 // Task进程保存的socketpair fd
     
+    // 注意：订阅管理已移至 PHP/Redis 层，C 层不再维护订阅数组
+    // C 层仅负责 SUBSCRIBE/NOTIFY 协议操作（需要 dialog_id）
+    
 } SipContext;
 
 // 任务消息结构（socketpair传递）
@@ -375,6 +394,83 @@ int sip_send_catalog_query(SipContext *ctx, const char *device_id);
 int sip_send_device_info_query(SipContext *ctx, const char *device_id);
 int sip_send_ptz_control(SipContext *ctx, const char *device_id, const char *channel_id, int cmd, int speed);
 int sip_send_keepalive_response(SipContext *ctx, int tid);
+
+// ==================== SUBSCRIBE/NOTIFY 支持 (GB28181) ====================
+/**
+ * 发送 SUBSCRIBE 请求（订阅事件）
+ * 
+ * @param ctx SIP 上下文
+ * @param to_uri 目标 URI (如: sip:34020000001320000001@192.168.1.101:5060)
+ * @param event_type 事件类型 (Catalog, Alarm, MobilePosition)
+ * @param expires 订阅有效期（秒），0 表示取消订阅
+ * @param xml_body XML 消息体（GB28181 查询 XML）
+ * @return subscription_id >= 0 成功, < 0 失败
+ */
+int sip_send_subscribe(SipContext *ctx, const char *to_uri, const char *event_type, 
+                       int expires, const char *xml_body);
+
+/**
+ * 刷新订阅（续订）
+ * 
+ * @param ctx SIP 上下文
+ * @param subscription_id 订阅 ID（由 sip_send_subscribe 返回）
+ * @param expires 新的有效期（秒）
+ * @return 0 成功, -1 失败
+ */
+int sip_refresh_subscribe(SipContext *ctx, int subscription_id, int expires);
+
+/**
+ * 取消订阅
+ * 
+ * @param ctx SIP 上下文
+ * @param subscription_id 订阅 ID
+ * @return 0 成功, -1 失败
+ */
+int sip_cancel_subscribe(SipContext *ctx, int subscription_id);
+
+/**
+ * 发送 NOTIFY 响应（收到 NOTIFY 后回复 200 OK）
+ * 
+ * @param ctx SIP 上下文
+ * @param tid 事务 ID
+ * @param code 响应码（通常 200）
+ * @return 0 成功, -1 失败
+ */
+int sip_send_notify_response(SipContext *ctx, int tid, int code);
+
+/**
+ * 获取订阅信息
+ * 
+ * @param ctx SIP 上下文
+ * @param subscription_id 订阅 ID
+ * @return 订阅信息指针，NULL 表示不存在
+ */
+SubscriptionInfo* sip_get_subscription(SipContext *ctx, int subscription_id);
+
+/**
+ * 根据设备 ID 和事件类型查找订阅
+ * 
+ * @param ctx SIP 上下文
+ * @param device_id 设备 ID
+ * @param event_type 事件类型（Catalog/Alarm/MobilePosition）
+ * @return 订阅信息指针，NULL 表示不存在
+ */
+SubscriptionInfo* sip_find_subscription(SipContext *ctx, const char *device_id, const char *event_type);
+
+/**
+ * 获取所有订阅信息（填充 PHP 数组）
+ * 
+ * @param ctx SIP 上下文
+ * @param subscriptions_array PHP 数组
+ */
+void sip_get_all_subscriptions(SipContext *ctx, zval *subscriptions_array);
+
+/**
+ * 清理过期订阅
+ * 
+ * @param ctx SIP 上下文
+ */
+void sip_cleanup_expired_subscriptions(SipContext *ctx);
 
 // Task进程主动发送消息到Worker
 int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len);

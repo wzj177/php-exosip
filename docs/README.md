@@ -1,201 +1,253 @@
-# 文档索引
+# GB28181 项目文档索引
 
-本目录包含 php-exosip 扩展的所有技术文档。
-
-## 📚 核心架构文档
-
-### [LONG_TASK_SUPPORT.md](LONG_TASK_SUPPORT.md) 🆕 ⭐️
-长期任务支持文档 (v2.3.0)
-- onWorkerStart 回调说明
-- startLongTask() 方法详解
-- Redis/Kafka/RabbitMQ 订阅示例
-- Laravel 集成完整流程
-- 架构图和时间线分析
-
-### [SOCKET_FORK_ARCHITECTURE.md](SOCKET_FORK_ARCHITECTURE.md) 🆕 ⭐️
-Socket Fork 架构设计文档 (v2.3.0)
-- Fork 前后建立 Socket 的对比分析
-- 当前架构设计决策和理由
-- fd 清理实现细节
-- 生产环境验证方法
-- 工业界最佳实践参考
-
-### [MASTER_WORKER_TASK.md](MASTER_WORKER_TASK.md) ⭐️
-Master-Worker-Task 多进程架构完整说明
-- 架构设计原理
-- 进程通信机制
-- 使用指南和最佳实践
-- 性能优化建议
-
-### [MASTER_WORKER_TASK_IMPLEMENTATION.md](MASTER_WORKER_TASK_IMPLEMENTATION.md) ⭐️
-Task→Worker 管道通信实现细节
-- C 层实现(socketpair, 序列化)
-- PHP API 层(sendToWorker, onPipeMessage)
-- 使用示例和测试方法
-
-### [TCP_MODE_SUPPORT.md](TCP_MODE_SUPPORT.md) ⭐️
-TCP 传输模式支持文档
-- TCP vs UDP 对比
-- 设备连接管理(device_id ↔ fd 映射)
-- DeviceManager API 说明
-- GB28181Handler TCP 集成
-- 完整测试示例
-
-### [TASK_SERVER_OBJECT_SAFETY.md](TASK_SERVER_OBJECT_SAFETY.md) ⭐️
-Task 进程中 $server 对象安全性分析
-- fork() 内存模型详解
-- 进程隔离机制
-- 安全操作指南
-- 禁止操作列表
-
-## 🛠️ 开发指南
-
-### [CALLBACK_ERROR_HANDLING.md](CALLBACK_ERROR_HANDLING.md)
-PHP 回调错误处理机制
-- zend_try/zend_catch 异常捕获
-- CallbackWrapper 使用方法
-- onError 回调设计
-
-### [CLIENT_IMPLEMENTATION.md](CLIENT_IMPLEMENTATION.md)
-SIP 客户端实现说明
-- ExoSipClient 类设计
-- 手动事件循环模式
-- 避免后台线程问题
-
-### [QUICKSTART.md](QUICKSTART.md)
-快速开始指南
-- 安装步骤
-- 基础示例
-- 常见问题
-
-## 🔧 编译和部署
-
-### [BUILD_CENTOS.md](BUILD_CENTOS.md) / [CENTOS_COMPILE.md](CENTOS_COMPILE.md)
-CentOS 编译指南
-- 依赖安装
-- 编译步骤
-- 符号冲突修复
-
-### [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md)
-平台支持说明
-- Linux/macOS/Windows 差异
-- TCP 模式限制
-- 推荐配置
-
-## 🐛 问题修复
-
-### [BUG_FIX_SUMMARY.md](BUG_FIX_SUMMARY.md)
-Bug 修复总结
-- SIP MESSAGE 目标 IP 错误修复
-- Via received 参数使用
-- Contact vs 实际源地址
-
-### [CRITICAL_FIX_OSIP_LIST.md](CRITICAL_FIX_OSIP_LIST.md)
-osip_list 双重释放修复
-- 问题根源分析
-- 修复方案
-- 验证结果
-
-### [FIX_VALIDATION.md](FIX_VALIDATION.md)
-修复验证报告
-- 测试场景
-- 验证结果
-- 回归测试
-
-### [TEST_PATCH.md](TEST_PATCH.md)
-补丁测试说明
-- 测试方法
-- 预期结果
-- 回滚步骤
-
-### [PATCH_EXOSIP_5.3.0.md](PATCH_EXOSIP_5.3.0.md)
-eXosip 5.3.0 补丁说明
-- 补丁内容
-- 应用方法
-- 兼容性说明
-
-## 📖 业务文档(中文)
-
-### [国标注册流程.md](国标注册流程.md)
-GB28181 设备注册流程详解
-- 注册请求和响应
-- 认证机制(Digest MD5)
-- 状态机转换
-
-### [需要对接信令流程.md](需要对接信令流程.md)
-GB28181 信令对接清单
-- 设备管理信令
-- 实时点播信令
-- 云台控制信令
-- 录像回放信令
-
-### [抓包流程.md](抓包流程.md)
-SIP 抓包和分析方法
-- tcpdump 命令
-- Wireshark 过滤器
-- 常见问题排查
-
-### [架构升级.md](架构升级.md)
-架构演进历史
-- v1.0: 单进程模式
-- v2.0: 事件驱动
-- v2.1: Master-Worker-Task
-- v2.2: Task→Worker 管道
-
-### [单线程+queue+event loop的新方案.md](单线程+queue+evevt loop的新方案.md)
-早期架构设计方案(已废弃)
-- 单线程事件循环
-- 消息队列设计
-- 最终采用多进程方案
-
-## 📝 API 参考
-
-### [exosip.stub.php](exosip.stub.php)
-IDE 类型提示文件
-- ExoSip 类完整 API
-- SipEvent 类
-- SipSession 类
-- ExoSipClient 类
-- 所有回调和方法的文档注释
+> 本项目包含 GB28181 SIP 网关的完整文档，涵盖参考资料、架构设计、功能实现、待开发任务、部署运维和问题修复等方面。
 
 ---
 
-## 文档分类说明
+## 📂 文档结构
 
-**⭐️ 核心文档** - 必读,理解系统架构和关键功能  
-**🛠️ 开发指南** - 开发时参考,代码实现细节  
-**🔧 编译部署** - 安装配置,环境搭建  
-**🐛 问题修复** - 历史问题和解决方案  
-**📖 业务文档** - GB28181 业务逻辑,中文说明  
-**📝 API 参考** - API 完整文档
+```
+docs/
+├── 01-参考资料/          # GB28181 协议学习资料和参考项目分析
+├── 02-架构设计/          # 系统架构设计文档
+├── 03-功能实现/          # 已实现功能的详细说明
+├── 04-待开发功能/        # 待开发任务清单和2022版本支持
+├── 05-部署运维/          # 编译、部署和运维文档
+├── 06-问题修复/          # Bug修复和问题排查记录
+├── 07-开发指南/          # 开发规范和入门指南
+├── 开发进度/             # 开发进度记录
+├── ak-stream/            # AKStream 参考代码
+├── GB28181-Service/      # GB28181-Service 参考代码
+└── zlm/                  # ZLMediaKit 相关资料
+```
 
-## 推荐阅读顺序
+---
+
+## 🎯 快速导航
 
 ### 新手入门
-1. [QUICKSTART.md](QUICKSTART.md) - 快速开始
-2. [MASTER_WORKER_TASK.md](MASTER_WORKER_TASK.md) - 理解架构
-3. [exosip.stub.php](exosip.stub.php) - API 参考
+- [快速开始](05-部署运维/QUICKSTART.md) - 项目快速部署和测试
+- [开发指南](07-开发指南/README.md) - 开发环境配置和编码规范
+- [CentOS 编译](05-部署运维/CENTOS_COMPILE.md) - Linux 环境下的编译步骤
 
-### 深入开发
-1. [MASTER_WORKER_TASK_IMPLEMENTATION.md](MASTER_WORKER_TASK_IMPLEMENTATION.md) - 管道通信
-2. [TASK_SERVER_OBJECT_SAFETY.md](TASK_SERVER_OBJECT_SAFETY.md) - 进程安全
-3. [TCP_MODE_SUPPORT.md](TCP_MODE_SUPPORT.md) - TCP 模式
-4. [CALLBACK_ERROR_HANDLING.md](CALLBACK_ERROR_HANDLING.md) - 错误处理
+### 核心功能
+- [GB28181 命令指南](03-功能实现/GB28181_COMMAND_GUIDE.md) - 设备控制命令详解
+- [ZLMediaKit 集成](03-功能实现/GB28181_ZLM_INTEGRATION.md) - 媒体服务器对接
+- [TCP 模式支持](03-功能实现/TCP_MODE_SUPPORT.md) - TCP 主被动模式实现
+- [长任务支持](03-功能实现/LONG_TASK_SUPPORT.md) - 异步任务处理机制
 
-### GB28181 对接
-1. [国标注册流程.md](国标注册流程.md) - 注册流程
-2. [需要对接信令流程.md](需要对接信令流程.md) - 信令清单
-3. [抓包流程.md](抓包流程.md) - 调试方法
+### 待开发任务
+- ⚡ [C 扩展待开发](04-待开发功能/C_EXTENSION_TODO.md) - C 扩展层开发任务（约 20-30 工作日）
+- ⚡ [PHP 网关待开发](04-待开发功能/PHP_GATEWAY_TODO.md) - PHP 层开发任务（约 30-45 工作日）
+- [2022 版本支持](04-待开发功能/扩展2022版本国标协议方案.md) - GB28181-2022 新特性
+- [订阅功能状态](03-功能实现/SUBSCRIBE_FEATURE_STATUS.md) - 订阅功能支持情况
 
-### 运维部署
-1. [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md) - 平台选择
-2. [BUILD_CENTOS.md](BUILD_CENTOS.md) - 编译安装
-3. [README.md](../README.md) - 生产部署
+---
 
-## 维护说明
+## 📋 01-参考资料
 
-- 所有新功能应更新对应文档
-- Bug 修复应记录在 [BUG_FIX_SUMMARY.md](BUG_FIX_SUMMARY.md)
-- API 变更应同步更新 [exosip.stub.php](exosip.stub.php)
-- 中文文档保留用于业务对接参考
-- 过时文档标注 "(已废弃)" 但保留以供历史参考
+学习 GB28181 协议和参考其他项目实现：
+
+| 文档 | 说明 |
+|------|------|
+| [参考项目-akStream运作原理.md](01-参考资料/参考项目-akStream运作原理.md) | AKStream 项目架构分析 |
+| [国标注册流程.md](01-参考资料/国标注册流程.md) | GB28181 设备注册详细流程 |
+| [需要对接信令流程.md](01-参考资料/需要对接信令流程.md) | 信令对接要点说明 |
+| [抓包流程.md](01-参考资料/抓包流程.md) | SIP 信令抓包分析方法 |
+
+---
+
+## 🏗️ 02-架构设计
+
+系统整体架构和核心机制设计：
+
+| 文档 | 说明 |
+|------|------|
+| [架构升级.md](02-架构设计/架构升级.md) | 系统架构演进历史 |
+| [单线程+queue+event loop的新方案.md](02-架构设计/单线程+queue+evevt%20loop的新方案.md) | 基于 Workerman 的事件循环架构 |
+| [SOCKET_FORK_ARCHITECTURE.md](02-架构设计/SOCKET_FORK_ARCHITECTURE.md) | Socket 复制和进程 fork 机制 |
+| [FORK_MEMORY_COPY_MECHANISM.md](02-架构设计/FORK_MEMORY_COPY_MECHANISM.md) | 进程间内存复制机制 |
+| [MASTER_WORKER_TASK.md](02-架构设计/MASTER_WORKER_TASK.md) | Master-Worker 任务模型 |
+| [MASTER_WORKER_TASK_IMPLEMENTATION.md](02-架构设计/MASTER_WORKER_TASK_IMPLEMENTATION.md) | 任务模型实现细节 |
+
+---
+
+## ✅ 03-功能实现
+
+已实现功能的详细技术文档：
+
+### 核心功能
+| 文档 | 说明 |
+|------|------|
+| [GB28181_COMMAND_GUIDE.md](03-功能实现/GB28181_COMMAND_GUIDE.md) | GB28181 所有命令的使用指南 |
+| [GB28181_HANDLER_ZLM_USAGE.md](03-功能实现/GB28181_HANDLER_ZLM_USAGE.md) | GB28181Handler 和 ZLM 对接 |
+| [GB28181_ZLM_INTEGRATION.md](03-功能实现/GB28181_ZLM_INTEGRATION.md) | ZLMediaKit 完整集成方案 |
+| [TCP_MODE_SUPPORT.md](03-功能实现/TCP_MODE_SUPPORT.md) | TCP 主动/被动模式支持 |
+
+### 客户端和回调
+| 文档 | 说明 |
+|------|------|
+| [CLIENT_IMPLEMENTATION.md](03-功能实现/CLIENT_IMPLEMENTATION.md) | Gb28181Client PHP SDK 实现 |
+| [CLIENT_USAGE.md](03-功能实现/CLIENT_USAGE.md) | 客户端使用示例 |
+| [CALLBACK_ERROR_HANDLING.md](03-功能实现/CALLBACK_ERROR_HANDLING.md) | 回调错误处理机制 |
+
+### 任务和消息
+| 文档 | 说明 |
+|------|------|
+| [LONG_TASK_SUPPORT.md](03-功能实现/LONG_TASK_SUPPORT.md) | 长任务支持（录像查询等） |
+| [LONG_TASK_REDIS_EXAMPLE.md](03-功能实现/LONG_TASK_REDIS_EXAMPLE.md) | Redis 任务队列示例 |
+| [TASK_SERVER_OBJECT_SAFETY.md](03-功能实现/TASK_SERVER_OBJECT_SAFETY.md) | TaskServer 对象安全性 |
+
+### SDP 和媒体
+| 文档 | 说明 |
+|------|------|
+| [SDP_PARSER_NATIVE.md](03-功能实现/SDP_PARSER_NATIVE.md) | C 扩展原生 SDP 解析 |
+| [SDP_PARSER_MIGRATION.md](03-功能实现/SDP_PARSER_MIGRATION.md) | SDP 解析迁移指南 |
+| [SDP_PARSER_DELIVERY.md](03-功能实现/SDP_PARSER_DELIVERY.md) | SDP 解析交付说明 |
+
+### 扩展功能
+| 文档 | 说明 |
+|------|------|
+| [语音对讲.md](03-功能实现/语音对讲.md) | 语音对讲功能设计 |
+| [DEVICE_CONFIG_EXTEND.md](03-功能实现/DEVICE_CONFIG_EXTEND.md) | 设备配置扩展方案 |
+| [SUBSCRIBE_FEATURE_STATUS.md](03-功能实现/SUBSCRIBE_FEATURE_STATUS.md) | SUBSCRIBE 订阅功能状态 |
+
+---
+
+## 🚧 04-待开发功能
+
+待开发任务清单和新功能规划：
+
+### 🎯 核心待办
+| 文档 | 说明 | 工作量 |
+|------|------|--------|
+| ⚡ [C_EXTENSION_TODO.md](04-待开发功能/C_EXTENSION_TODO.md) | **C 扩展层待开发任务** | 20-30 工作日 |
+| ⚡ [PHP_GATEWAY_TODO.md](04-待开发功能/PHP_GATEWAY_TODO.md) | **PHP 网关层待开发任务** | 30-45 工作日 |
+
+### GB28181-2022 支持
+| 文档 | 说明 |
+|------|------|
+| [扩展2022版本国标协议方案.md](04-待开发功能/扩展2022版本国标协议方案.md) | 2022 版本协议扩展方案 |
+| [GB28181_PRESET_AND_2022_GUIDE.md](04-待开发功能/GB28181_PRESET_AND_2022_GUIDE.md) | 预置位和 2022 版本指南 |
+| [PRESET_2022_SUMMARY.md](04-待开发功能/PRESET_2022_SUMMARY.md) | 2022 版本新特性总结 |
+
+### 功能扩展
+| 文档 | 说明 |
+|------|------|
+| [国标设备扩展功能-订阅.md](04-待开发功能/国标设备扩展功能-订阅.md) | 订阅功能（Catalog/Alarm/Position） |
+| [国标设备扩展功能-混合.md](04-待开发功能/国标设备扩展功能-混合.md) | 设备配置混合模式 |
+
+---
+
+## 🚀 05-部署运维
+
+编译、部署和运维相关文档：
+
+| 文档 | 说明 |
+|------|------|
+| [QUICKSTART.md](05-部署运维/QUICKSTART.md) | 快速开始指南 |
+| [BUILD_CENTOS.md](05-部署运维/BUILD_CENTOS.md) | CentOS 构建说明 |
+| [CENTOS_COMPILE.md](05-部署运维/CENTOS_COMPILE.md) | CentOS 详细编译步骤 |
+| [PATCH_EXOSIP_5.3.0.md](05-部署运维/PATCH_EXOSIP_5.3.0.md) | eXosip2 5.3.0 补丁 |
+| [PLATFORM_SUPPORT.md](05-部署运维/PLATFORM_SUPPORT.md) | 平台支持情况 |
+
+---
+
+## 🔧 06-问题修复
+
+Bug 修复记录和问题排查文档：
+
+| 文档 | 说明 |
+|------|------|
+| [BUG_FIX_SUMMARY.md](06-问题修复/BUG_FIX_SUMMARY.md) | Bug 修复总结 |
+| [API_FIX_SUMMARY.md](06-问题修复/API_FIX_SUMMARY.md) | API 修复总结 |
+| [FIX_VALIDATION.md](06-问题修复/FIX_VALIDATION.md) | 修复验证记录 |
+| [CRITICAL_FIX_OSIP_LIST.md](06-问题修复/CRITICAL_FIX_OSIP_LIST.md) | osip_list 关键修复 |
+| [ACTIVE_COMMAND_FLOW.md](06-问题修复/ACTIVE_COMMAND_FLOW.md) | 主动命令流程问题修复 |
+
+---
+
+## 📖 07-开发指南
+
+开发规范和入门指南：
+
+| 文档 | 说明 |
+|------|------|
+| [README.md](07-开发指南/README.md) | 开发者入门指南 |
+
+---
+
+## 📊 开发进度
+
+项目开发进度跟踪：
+
+| 文档 | 说明 |
+|------|------|
+| [信令网关核心功能清单.md](开发进度/信令网关核心功能清单.md) | 核心功能完成情况 |
+| [GB28181生产就绪度分析.md](开发进度/GB28181生产就绪度分析.md) | 生产环境就绪度评估 |
+| [TCP_MODE_FIX.md](开发进度/TCP_MODE_FIX.md) | TCP 模式修复进展 |
+| [11-30最近进展.md](开发进度/11-30最近进展.md) | 11月30日进展 |
+| [12-01进展.md](开发进度/12-01进展.md) | 12月1日进展 |
+| [12-10进展.md](开发进度/12-10进展.md) | 12月10日进展 |
+
+---
+
+## 🔍 参考代码
+
+外部项目参考代码：
+
+- **ak-stream/**: AKStream 项目相关代码片段（C#）
+- **GB28181-Service/**: GB28181-Service 项目参考（C++）
+- **zlm/**: ZLMediaKit 相关配置和文档
+
+---
+
+## 📌 重要提示
+
+### ⚡ 当前优先级最高的任务
+
+1. **设备配置扩展完整实现** (P0)
+   - 字符集编码处理
+   - 通道类型过滤
+   - media_host 在 SDP 中使用
+   - API 配置同步
+
+2. **SUBSCRIBE/NOTIFY 完整实现** (P0)
+   - Catalog 订阅（目录变更）
+   - Alarm 订阅（报警事件）
+   - MobilePosition 订阅（位置上报）
+   - 订阅自动刷新机制
+
+3. **C 扩展 SUBSCRIBE 支持** (P0)
+   - SUBSCRIBE 请求发送
+   - NOTIFY 请求接收和解析
+   - 订阅状态管理
+
+### 📅 预计工作量
+
+- **C 扩展层**: 20-30 工作日
+- **PHP 网关层**: 30-45 工作日
+- **总计**: 约 2-3 个月（单人开发）
+
+详见：
+- [C_EXTENSION_TODO.md](04-待开发功能/C_EXTENSION_TODO.md)
+- [PHP_GATEWAY_TODO.md](04-待开发功能/PHP_GATEWAY_TODO.md)
+
+---
+
+## 📚 相关资源
+
+- **GB28181 标准**: GB/T 28181-2016 和 GB/T 28181-2022
+- **eXosip2**: http://savannah.nongnu.org/projects/exosip
+- **osip2**: http://www.gnu.org/software/osip/
+- **ZLMediaKit**: https://github.com/ZLMediaKit/ZLMediaKit
+- **Workerman**: https://www.workerman.net/
+- **Webman**: https://www.workerman.net/doc/webman/
+
+---
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+文档更新日期: 2026-01-07
