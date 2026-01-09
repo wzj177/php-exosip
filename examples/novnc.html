@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>noVNC UMD test</title>
+  <style>
+    body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    #topbar { padding:8px; background:#111; color:#fff; display:flex; gap:8px; align-items:center; }
+    #controls input { padding:6px; border-radius:4px; border:1px solid #ccc; }
+    #controls button { padding:6px 10px; border-radius:6px; border:0; cursor:pointer; }
+    #status { margin-left:12px; font-size:13px; opacity:0.9; }
+    #vncContainer { width:100vw; height:calc(100vh - 48px); background:#000; display:flex; align-items:center; justify-content:center; }
+    #overlay { position:absolute; left:12px; top:56px; color:#fff; z-index:20; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <div id="controls">
+      WebSocket URL:
+      <input id="wsUrl" style="width:360px" placeholder="ws://localhost:6080 (example)" />
+      Password:
+      <input id="password" placeholder="vnc password (optional)" />
+      <button id="connectBtn">Connect</button>
+      <button id="disconnectBtn" disabled>Disconnect</button>
+    </div>
+    <div id="status">Status: <span id="statusText">idle</span></div>
+  </div>
+
+  <div id="vncContainer"></div>
+
+  <!-- polyfill (optional for older browsers) -->
+  <script src="https://cdn.jsdelivr.net/npm/@novnc/novnc@1.3.0/vendor/promise.js"></script>
+  <!-- UMD rfb (exposes global RFB) -->
+  <script src="https://cdn.jsdelivr.net/npm/@novnc/novnc@1.3.0/dist/rfb.js"></script>
+
+  <script>
+    (function () {
+      const container = document.getElementById('vncContainer');
+      const statusText = document.getElementById('statusText');
+      const wsUrlInput = document.getElementById('wsUrl');
+      const passwordInput = document.getElementById('password');
+      const connectBtn = document.getElementById('connectBtn');
+      const disconnectBtn = document.getElementById('disconnectBtn');
+
+      let rfb = null;
+
+      function setStatus(s) {
+        statusText.textContent = s;
+      }
+
+      function safeDisconnect() {
+        if (!rfb) return;
+        try {
+          rfb.disconnect();
+        } catch (e) {
+          console.warn('disconnect error', e);
+        }
+        rfb = null;
+      }
+
+      connectBtn.addEventListener('click', () => {
+        const url = wsUrlInput.value.trim();
+        if (!url) {
+          alert('Please enter the websocket URL (e.g. ws://localhost:6080)');
+          return;
+        }
+
+        // If already connected, disconnect first
+        if (rfb) {
+          safeDisconnect();
+        }
+
+        setStatus('connecting...');
+        connectBtn.disabled = true;
+        disconnectBtn.disabled = false;
+
+        // Create RFB instance (RFB is global from the UMD build)
+        try {
+          rfb = new RFB(container, url, {
+            credentials: { password: passwordInput.value || undefined },
+            shared: true,
+            // you can add more options here
+          });
+        } catch (err) {
+          console.error('RFB construction failed', err);
+          setStatus('construction error: ' + err.message);
+          connectBtn.disabled = false;
+          disconnectBtn.disabled = true;
+          rfb = null;
+          return;
+        }
+
+        rfb.addEventListener('connect', () => {
+          console.log('Connected');
+          setStatus('connected');
+          connectBtn.disabled = true;
+          disconnectBtn.disabled = false;
+        });
+
+        rfb.addEventListener('disconnect', (e) => {
+          console.log('Disconnected', e && e.detail);
+          setStatus('disconnected' + (e && e.detail ? (' (' + e.detail + ')') : ''));
+          connectBtn.disabled = false;
+          disconnectBtn.disabled = true;
+          rfb = null;
+        });
+
+        rfb.addEventListener('credentialsrequired', (e) => {
+          console.log('credentialsrequired', e);
+          // If server asks for credentials (e.g. VNC auth), prompt the user
+          const pass = prompt('VNC server requires a password, enter it:');
+          if (pass !== null) {
+            rfb.sendCredentials({ password: pass });
+          } else {
+            safeDisconnect();
+          }
+        });
+
+        rfb.addEventListener('securityfailure', (e) => {
+          console.error('Security failure', e);
+          setStatus('security failure: ' + (e.detail && e.detail.reason ? e.detail.reason : 'unknown'));
+        });
+
+        rfb.addEventListener('clipboard', (e) => {
+          console.log('clipboard', e.detail);
+        });
+
+        // Resize handling (keep canvas filling the container)
+        window.addEventListener('resize', () => {
+          if (rfb && rfb.scaleViewport) {
+            try { rfb.scaleViewport = true; } catch (err) { /* ignore */ }
+          }
+        });
+      });
+
+      disconnectBtn.addEventListener('click', () => {
+        safeDisconnect();
+        setStatus('disconnected');
+        connectBtn.disabled = false;
+        disconnectBtn.disabled = true;
+      });
+
+      // helpful tip: prefill a common local test URL
+      wsUrlInput.value = 'ws://localhost:6080'; // change as needed
+    })();
+  </script>
+</body>
+</html>

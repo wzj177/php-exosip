@@ -6,6 +6,9 @@
 
 - ✅ **纯面向对象** - 简洁的 OOP API
 - ✅ **事件驱动** - 支持所有 RFC 3261 SIP 方法
+- ✅ **Master-Worker-Task 架构** - 多进程高并发支持
+- ✅ **Task→Worker 管道通信** - 实时双向消息推送
+- ✅ **TCP/UDP 双模式** - 完整的连接管理
 - ✅ **GB28181 支持** - 国标视频监控协议
 - ✅ **跨平台** - Linux/macOS/Windows
 - ✅ **生产就绪** - 经过压测验证（1000+并发）
@@ -20,6 +23,34 @@
 
 > **注意**：macOS 和 Windows 平台 TCP 支持受限，推荐使用 UDP 模式。
 > 生产环境建议使用 Linux + TCP。
+
+## 架构说明
+
+本扩展提供两种运行模式：
+
+### 1. Master-Worker-Task 多进程架构（推荐生产环境）
+
+```
+Master (监控) → Worker (SIP 事件循环) → Task Pool (异步任务)
+                    ↕ (pipe 双向通信)
+```
+
+**优势**：
+- ✅ SIP 事件循环永不阻塞
+- ✅ Worker 崩溃自动恢复
+- ✅ 高并发异步处理（HTTP、数据库、Redis）
+- ✅ Task→Worker 实时推送（sendToWorker）
+- ✅ TCP 连接管理（device_id ↔ fd 映射）
+
+**详细文档**：
+- [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
+- [Task→Worker 管道通信](docs/MASTER_WORKER_TASK_IMPLEMENTATION.md)
+- [TCP 模式支持](docs/TCP_MODE_SUPPORT.md)
+- [Task 进程安全性](docs/TASK_SERVER_OBJECT_SAFETY.md)
+
+### 2. 单进程模式（适合小型应用）
+
+直接使用 `run()` 方法，适合快速开发和测试。
 
 ## 快速开始
 
@@ -185,6 +216,31 @@ public function __construct(?array $config = null)
 - `sipPass` (string): SIP 认证密码
 - `debug` (bool): 调试模式，默认 `false`
 
+**Master-Worker-Task 配置**（可选）：
+- `task_worker_num` (int): Task 进程数量，默认 `4`
+- `timer_interval` (int): 定时器间隔（毫秒），默认 `1000`
+- `pid_file` (string): PID 文件路径，例如 `/tmp/server.pid`
+
+**示例**：
+```php
+// 单进程模式
+$sip = new ExoSip([
+    'host' => '0.0.0.0',
+    'port' => 5060,
+    'mode' => 'UDP',
+]);
+
+// Master-Worker-Task 模式
+$sip = new ExoSip([
+    'host' => '0.0.0.0',
+    'port' => 5060,
+    'mode' => 'UDP',
+    'task_worker_num' => 4,      // 4个异步任务进程
+    'timer_interval' => 30000,   // 30秒定时器
+    'pid_file' => '/tmp/gb28181_server.pid',
+]);
+```
+
 #### 核心方法
 
 ```php
@@ -205,6 +261,47 @@ public function sendResponse(int $tid, int $code, ?string $reason = null): bool
 
 // 获取统计信息
 public function getStats(): array
+
+// Master-Worker-Task 专用方法
+public function addTask(array $data): int  // 投递异步任务，返回任务ID
+public function getProcessStatus(): array  // 获取进程状态（内部调用）
+
+// 静态方法
+public static function getRunStatus(string $pidFile): array  // 从外部查询进程状态
+```
+
+**Master-Worker-Task 回调**：
+```php
+// 异步任务处理（在 Task 进程中执行）
+public $onTask = function(int $taskId, array $data) {
+    // 执行耗时操作（HTTP、数据库、Redis）
+    $result = doSomeWork($data);
+    
+    // 实时推送结果给 Worker（不用等 return）
+    $this->sendToWorker(['type' => 'progress', 'data' => $result]);
+    
+    return ['status' => 'success'];
+};
+
+// 任务完成回调（在 Worker 进程中执行）
+public $onTaskFinish = function(int $taskId, $result) {
+    // 处理 onTask 的 return 值
+    echo "Task #{$taskId} finished: " . json_encode($result) . "\n";
+};
+
+// 管道消息回调（在 Worker 进程中执行）
+public $onPipeMessage = function($server, $data) {
+    // 处理 Task 通过 sendToWorker() 推送的消息
+    if ($data['type'] === 'progress') {
+        echo "Progress update: " . json_encode($data['data']) . "\n";
+    }
+};
+
+// 定时器（在 Worker 进程中执行）
+public $onTimer = function() {
+    // 定期检查设备超时、清理资源等
+    return true;  // 返回 true 继续运行，false 停止
+};
 ```
 
 #### 事件回调
@@ -389,6 +486,96 @@ public function processEvents(int $timeout_ms = 0): array
 
 ## 生产部署
 
+### Master-Worker-Task 模式（推荐）
+
+```php
+<?php
+// production/gb28181_server.php
+require_once __DIR__ . '/GB28181Handler.php';
+
+$sipServer = new ExoSip([
+    'ua' => 'GB28181-Server/1.0',
+    'ip' => '0.0.0.0',
+    'port' => 5060,
+    'mode' => 'udp',
+    
+    // 多进程配置
+    'task_worker_num' => 4,
+    'timer_interval' => 30000,  // 30秒
+    'pid_file' => '/tmp/gb28181_server.pid',
+]);
+
+// 绑定业务处理器
+$gb28181 = new GB28181Handler($sipServer, [
+    'server_id' => '34020000002000000001',
+    'server_domain' => '3402000000',
+]);
+$gb28181->bindEvents();
+
+// 异步任务处理
+$sipServer->onTask = function($taskId, $data) {
+    $type = $data['type'] ?? 'unknown';
+    $payload = $data['payload'] ?? [];
+    
+    try {
+        switch ($type) {
+            case 'webhook':
+                // HTTP 请求
+                $result = file_get_contents($payload['url'], false, stream_context_create([
+                    'http' => [
+                        'method' => 'POST',
+                        'header' => 'Content-Type: application/json',
+                        'content' => json_encode($payload['data']),
+                        'timeout' => 5,
+                    ]
+                ]));
+                return ['success' => true, 'response' => $result];
+                
+            case 'save_catalog':
+                // 数据库操作
+                $db = new PDO('mysql:host=localhost;dbname=gb28181', 'user', 'pass');
+                $stmt = $db->prepare("INSERT INTO catalog ...");
+                $stmt->execute($payload);
+                return ['success' => true];
+                
+            default:
+                return ['success' => false, 'error' => 'Unknown task'];
+        }
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => $e->getMessage()];
+    }
+};
+
+// 任务完成回调
+$sipServer->onTaskFinish = function($taskId, $result) {
+    if ($result['success']) {
+        error_log("Task #{$taskId} completed successfully");
+    } else {
+        error_log("Task #{$taskId} failed: {$result['error']}");
+    }
+};
+
+// 定时器
+$sipServer->onTimer = function() use ($gb28181) {
+    $gb28181->processTimeouts();
+    return true;
+};
+
+$sipServer->run();
+```
+
+**进程状态查询**：
+```php
+<?php
+// production/status.php
+$status = ExoSip::getRunStatus('/tmp/gb28181_server.pid');
+
+echo "Master PID: {$status['master']['pid']}\n";
+echo "Worker PID: {$status['worker']['pid']}\n";
+echo "Worker Memory: " . round($status['worker']['memory_rss_kb'] / 1024, 2) . " MB\n";
+echo "Task Workers: " . count($status['tasks']) . "\n";
+```
+
 ### 单进程模式
 
 ```php
@@ -398,36 +585,46 @@ $sip->onRegister = function($event) { /* ... */ };
 $sip->run();
 ```
 
-### 多进程模式（推荐）
-
-```php
-<?php
-// deploy/master.php
-for ($i = 0; $i < 4; $i++) {
-    $pid = pcntl_fork();
-    if ($pid == 0) {
-        $sip = new ExoSip(['port' => 5060 + $i]);
-        $sip->run();
-        exit(0);
-    }
-}
-```
+**注意**：单进程模式适合小型应用（<100 并发），生产环境推荐使用 Master-Worker-Task 模式。
 
 ### Systemd 服务
 
 ```ini
 [Unit]
-Description=GB28181 SIP Server
+Description=GB28181 SIP Server (Master-Worker-Task)
 After=network.target
 
 [Service]
 Type=simple
 User=www-data
-ExecStart=/usr/bin/php /opt/gb28181/server.php
+WorkingDirectory=/opt/gb28181
+ExecStart=/usr/bin/php /opt/gb28181/production/gb28181_server.php
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/tmp/gb28181_server.pid
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+```
+
+**操作**：
+```bash
+# 安装服务
+sudo cp gb28181.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# 启动服务
+sudo systemctl start gb28181
+
+# 查看状态
+sudo systemctl status gb28181
+
+# 开机自启
+sudo systemctl enable gb28181
+
+# 查看日志
+sudo journalctl -u gb28181 -f
 ```
 
 ### Docker 部署
@@ -444,18 +641,21 @@ CMD ["php", "server.php"]
 ```
 php-exosip/
 ├── README.md              # 本文件
-├── php_exosip.c          # 主扩展代码
-├── exosip_wrapper.c      # eXosip2 封装
+├── php_exosip.c          # 主扩展代码（2536行）
+├── exosip_wrapper.c      # eXosip2 封装（3123行）
 ├── exosip_wrapper.h      # 头文件
 ├── config.m4             # 编译配置
 ├── docs/
-│   ├── exosip.stub.php   # IDE 支持文件
-│   └── PLATFORM_SUPPORT.md  # 平台支持说明
+│   ├── MASTER_WORKER_TASK.md  # Master-Worker-Task 架构详解 ⭐️
+│   ├── exosip.stub.php        # IDE 支持文件
+│   └── PLATFORM_SUPPORT.md    # 平台支持说明
 ├── examples/
-│   ├── test_event_debug.php    # 事件调试
-│   ├── gb28181_server.php      # GB28181 示例
-│   ├── CrossPlatformSipServer.php  # 跨平台封装
-│   └── GB28181-Service/        # C++ 参考实现
+│   ├── gb28181_server.php           # GB28181 服务端示例
+│   ├── gb28181_server_status.php    # 进程状态查询脚本
+│   ├── protocol/GB28181Handler.php  # GB28181 协议处理器
+│   ├── test_event_debug.php         # 事件调试
+│   ├── CrossPlatformSipServer.php   # 跨平台封装
+│   └── GB28181-Service/             # C++ 参考实现
 └── tests/
     ├── test_exosip_tcp.c   # C 测试程序
     └── test_exosip_udp.c   # UDP 测试程序
@@ -487,11 +687,18 @@ sudo kill -9 <PID>
 
 ### 3. 性能优化？
 
-**多进程部署**：
+**使用 Master-Worker-Task 架构**（推荐）：
 ```php
-// 4个Worker进程，监听不同端口
-// 5060, 5061, 5062, 5063
-// Nginx/HAProxy 负载均衡
+$sip = new ExoSip([
+    'task_worker_num' => 4,      // 4个异步任务进程
+    'timer_interval' => 30000,   // 30秒定时器
+]);
+
+// HTTP/数据库/Redis 等耗时操作在 Task 进程中执行，不阻塞 SIP 事件循环
+$sip->onTask = function($taskId, $data) {
+    // 异步执行
+    return doSomeWork($data);
+};
 ```
 
 **系统优化**：
@@ -501,6 +708,8 @@ net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.ipv4.udp_mem = 16384 131072 262144
 ```
+
+**详细性能优化**：参见 [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
 
 ### 4. 调试技巧？
 
@@ -559,6 +768,24 @@ php examples/test_event_debug.php
 - [RFC 3261 - SIP](https://tools.ietf.org/html/rfc3261)
 - [GB/T 28181-2016](https://openstd.samr.gov.cn/)
 
+### 项目文档
+
+**核心架构** ⭐️
+- [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
+- [Task→Worker 管道通信实现](docs/MASTER_WORKER_TASK_IMPLEMENTATION.md)
+- [TCP 模式支持](docs/TCP_MODE_SUPPORT.md)
+- [Task 进程安全性分析](docs/TASK_SERVER_OBJECT_SAFETY.md)
+
+**开发指南**
+- [回调错误处理](docs/CALLBACK_ERROR_HANDLING.md)
+- [SIP 客户端实现](docs/CLIENT_IMPLEMENTATION.md)
+- [快速开始](docs/QUICKSTART.md)
+- [平台支持说明](docs/PLATFORM_SUPPORT.md)
+
+**API 参考**
+- [IDE 支持文件 (exosip.stub.php)](docs/exosip.stub.php)
+- [文档索引](docs/README.md)
+
 ### 示例项目
 - [GB28181-Service](examples/GB28181-Service/) - C++ 参考实现
 - [ZLMediaKit](https://github.com/ZLMediaKit/ZLMediaKit) - 流媒体服务器
@@ -573,6 +800,86 @@ MIT License
 
 ## 更新日志
 
+### v2.3.0 (2025-01-25) 🚀
+
+**长期任务支持 (Long Task):**
+
+#### ✅ onWorkerStart 回调
+- Worker 进程启动时触发
+- 用于初始化资源、启动长期任务
+
+#### ✅ startLongTask() 方法
+- 创建专用的长期任务进程
+- 允许永久阻塞(Redis::subscribe、Kafka consume 等)
+- 不占用普通 Task 进程池
+- 通过 sendToWorker() 推送消息给 Worker
+
+**典型应用场景:**
+- ✅ Redis PubSub 订阅 (真正的 subscribe,不是 blPop!)
+- ✅ Kafka 消费者 (长连接消费)
+- ✅ RabbitMQ 消费者 (队列监听)
+- ✅ WebSocket 长连接
+- ✅ 任何需要永久阻塞的场景
+
+**架构优势:**
+```
+Worker (SIP 事件) + Task Pool (短期任务) + Long Task (订阅/队列)
+         ↕                    ↕                        ↕
+   不阻塞,实时         DB/HTTP/API         Redis/Kafka/MQ
+                                          (永久阻塞 OK!)
+```
+
+**文档和示例:**
+- 📖 [Long Task 完整文档](docs/LONG_TASK_SUPPORT.md)
+- 🧪 [Redis 订阅示例](examples/test_redis_subscriber.php)
+- 📝 [API 文档](docs/exosip.stub.php)
+
+---
+
+### v2.2.0 (2024-11-25) 🎉
+
+**三大核心功能完成:**
+
+#### ✅ Task 1: C 层管道通信
+- 实现 Task→Worker 双向通信机制
+- 修改 `task_msg_t` 和 `task_result_t` 添加 `type` 字段
+- 实现 `sip_task_send_to_worker()` 函数
+- 修改 `sip_handle_task_result()` 区分消息类型
+
+#### ✅ Task 2: PHP API 层
+- 添加 `onPipeMessage` 回调(Worker 接收 Task 推送)
+- 实现 `sendToWorker($data)` 方法(Task 推送给 Worker)
+- 完整的属性读写处理器和初始化
+- 创建测试示例: `test_pipe_message.php`, `test_laravel_integration.php`
+
+#### ✅ Task 3: TCP 传输模式支持
+- DeviceManager 添加双向映射: `device_id ↔ fd`
+- 实现 8 个连接管理方法(bind/unbind/get/has)
+- GB28181Handler 自动处理 TCP 连接
+- SipEvent 添加 `getFd()` 方法
+- 创建完整文档: `TCP_MODE_SUPPORT.md`
+
+**架构增强:**
+- ✅ Laravel 集成架构: Laravel → Redis → Task → Worker → Device
+- ✅ 进程安全文档: `TASK_SERVER_OBJECT_SAFETY.md`
+- ✅ 完整测试覆盖: 管道通信、Laravel 集成、TCP 模式
+
+**文档完善:**
+- 更新 `exosip.stub.php` 添加所有新 API
+- 创建 `docs/README.md` 文档索引
+- 整理并归类所有技术文档
+
+### v2.1.0 (2024)
+- ✅ **Master-Worker-Task 多进程架构**
+  - Master 监控进程（自动恢复 Worker）
+  - Worker SIP 事件循环（永不阻塞）
+  - Task Pool 异步任务池（HTTP/数据库/Redis）
+- ✅ **异步任务处理** - onTask/onTaskFinish 回调
+- ✅ **定时器支持** - onTimer 回调（可配置间隔）
+- ✅ **进程状态查询** - getProcessStatus/getRunStatus
+- ✅ **资源监控** - 内存、FD、运行时长统计
+- ✅ **异常保护** - 回调异常自动捕获，不崩溃
+
 ### v2.0.0 (2024)
 - ✅ 纯 OOP API 重构
 - ✅ 事件驱动架构
@@ -586,3 +893,13 @@ MIT License
 ---
 
 **Ready for Production** ✨
+
+**完整功能清单:**
+- ✅ Master-Worker-Task 多进程架构
+- ✅ Task→Worker 实时管道通信
+- ✅ TCP/UDP 双模式连接管理
+- ✅ GB28181 国标协议完整支持
+- ✅ Laravel 集成架构
+- ✅ 异常安全保护
+
+查看完整文档：[docs/README.md](docs/README.md)

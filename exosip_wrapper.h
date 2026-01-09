@@ -54,6 +54,20 @@ typedef struct _device_info {
     int channel;
 } DeviceInfo;
 
+// 订阅信息结构（仅用于返回值，实际存储在 PHP/Redis 层）
+typedef struct _subscription_info {
+    int subscription_id;          // 订阅 ID (sid)
+    int dialog_id;                // 对话 ID
+    char device_id[64];           // 设备 ID
+    char event_type[32];          // 事件类型
+    int expires;                  // 有效期（秒）
+    time_t created_at;            // 创建时间
+    time_t last_refresh;          // 上次刷新时间
+    time_t next_refresh;          // 下次刷新时间
+} SubscriptionInfo;
+
+// 注意：订阅管理已移至 PHP 层（Redis 存储），C 层仅负责 SIP 协议操作
+
 // SIP事件类型增强
 typedef enum {
     SIP_EVENT_REGISTER = 1,
@@ -98,6 +112,8 @@ typedef enum {
     GB_CMD_PTZ_CONTROL,
     GB_CMD_RECORD_INFO,
     GB_CMD_ALARM,
+    GB_CMD_SUBSCRIBE,
+    GB_CMD_NOTIFY,
     GB_CMD_CONFIG_DOWNLOAD,
     GB_CMD_PRESET_QUERY
 } GB28181CmdType;
@@ -196,6 +212,13 @@ typedef struct _sip_statistics {
 // 原因：单线程事件循环 + eXosip_lock/unlock 足够高效
 // 性能：即使1000设备并发，每次加锁仅1ms，总延迟<1秒
 
+// Debug 日志宏
+#define DEBUG_LOG(ctx, ...) do { \
+    if (ctx && ctx->server_info.debug) { \
+        fprintf(stderr, __VA_ARGS__); \
+    } \
+} while(0)
+
 // SIP上下文结构（完整版）
 typedef struct _sip_context {
     struct eXosip_t *ctx;
@@ -205,6 +228,7 @@ typedef struct _sip_context {
     // 服务器配置
     ServerInfo server_info;
     int running;
+    char local_ip[64];          // 实际本地 IP（从 socket 获取）
     
     // 连接管理
     ConnectionInfo connections[MAX_CONNECTIONS];
@@ -230,12 +254,67 @@ typedef struct _sip_context {
     time_t last_timer_tick;     // 上次触发时间（秒）
     long last_timer_tick_us;    // 上次触发时间（微秒）
     
+    // Master-Worker-Task 进程管理
+    pid_t master_pid;
+    pid_t worker_pid;
+    int worker_sockfd;          // Master-Worker socketpair (Master侧)
+    pid_t *task_pids;
+    int task_count;
+    int *task_sockfds;
+    pid_t *long_task_pids;      // Long Task PIDs (预分配槽位)
+    int *long_task_sockfds;     // Long Task socketpair 数组
+    int long_task_count;        // Long Task 槽位数量
+    zval *long_task_callbacks;  // Long Task 回调数组 (Worker 设置)
+    char pid_file[256];         // PID 文件路径
+    
+    // 进程状态标识
+    int is_master;
+    int is_worker;
+    int is_task;
+    int is_long_task;  // Long Task 进程标志
+    int task_worker_id;
+    
+    // 任务统计
+    unsigned long tasks_posted;
+    unsigned long tasks_failed;
+    time_t worker_start_time;
+    int worker_restart_count;
+    
+    // Task 回调
+    zval task_callback;
+    zval task_finish_callback;
+    
     // 原始数据缓存（可选）
     int save_raw_data;
     RawData *raw_data_buffer;
     int raw_data_size;
     
+    // Pipe message callback (Task→Worker主动推送)
+    zval pipe_message_callback;
+    unsigned long pipe_msg_counter;  // 管道消息计数器
+    int task_sockfd;                 // Task进程保存的socketpair fd
+    
+    // 注意：订阅管理已移至 PHP/Redis 层，C 层不再维护订阅数组
+    // C 层仅负责 SUBSCRIBE/NOTIFY 协议操作（需要 dialog_id）
+    
 } SipContext;
+
+// 任务消息结构（socketpair传递）
+typedef struct {
+    unsigned long task_id;
+    size_t data_len;
+    char type;                // 0=Worker→Task任务, 1=Task→Worker主动推送
+    char data[0];
+} task_msg_t;
+
+// 任务结果结构
+typedef struct {
+    unsigned long task_id;
+    int success;
+    size_t result_len;
+    char type;                // 0=任务结果, 1=主动推送消息
+    char result[0];
+} task_result_t;
 
 // 客户端配置信息
 typedef struct _client_config {
@@ -305,7 +384,7 @@ void sip_cleanup_expired_sessions(SipContext *ctx, int timeout_seconds);
 // 消息发送
 int sip_send_register_response(SipContext *ctx, int tid, int code, const char *auth_header);
 int sip_send_message_response(SipContext *ctx, int tid, int code, const char *body);
-int sip_send_invite(SipContext *ctx, const char *target_uri, const char *sdp_body);
+int sip_send_invite(SipContext *ctx, const char *to_uri, const char *sdp, const char *subject);
 int sip_send_bye(SipContext *ctx, int call_id, int dialog_id);
 int sip_send_ack(SipContext *ctx, int dialog_id);
 int sip_send_message(SipContext *ctx, const char *target_uri, const char *content_type, const char *body);
@@ -315,6 +394,86 @@ int sip_send_catalog_query(SipContext *ctx, const char *device_id);
 int sip_send_device_info_query(SipContext *ctx, const char *device_id);
 int sip_send_ptz_control(SipContext *ctx, const char *device_id, const char *channel_id, int cmd, int speed);
 int sip_send_keepalive_response(SipContext *ctx, int tid);
+
+// ==================== SUBSCRIBE/NOTIFY 支持 (GB28181) ====================
+/**
+ * 发送 SUBSCRIBE 请求（订阅事件）
+ * 
+ * @param ctx SIP 上下文
+ * @param to_uri 目标 URI (如: sip:34020000001320000001@192.168.1.101:5060)
+ * @param event_type 事件类型 (Catalog, Alarm, MobilePosition)
+ * @param expires 订阅有效期（秒），0 表示取消订阅
+ * @param xml_body XML 消息体（GB28181 查询 XML）
+ * @return subscription_id >= 0 成功, < 0 失败
+ */
+int sip_send_subscribe(SipContext *ctx, const char *to_uri, const char *event_type, 
+                       int expires, const char *xml_body);
+
+/**
+ * 刷新订阅（续订）
+ * 
+ * @param ctx SIP 上下文
+ * @param subscription_id 订阅 ID（由 sip_send_subscribe 返回）
+ * @param expires 新的有效期（秒）
+ * @return 0 成功, -1 失败
+ */
+int sip_refresh_subscribe(SipContext *ctx, int subscription_id, int expires);
+
+/**
+ * 取消订阅
+ * 
+ * @param ctx SIP 上下文
+ * @param subscription_id 订阅 ID
+ * @return 0 成功, -1 失败
+ */
+int sip_cancel_subscribe(SipContext *ctx, int subscription_id);
+
+/**
+ * 发送 NOTIFY 响应（收到 NOTIFY 后回复 200 OK）
+ * 
+ * @param ctx SIP 上下文
+ * @param tid 事务 ID
+ * @param code 响应码（通常 200）
+ * @return 0 成功, -1 失败
+ */
+int sip_send_notify_response(SipContext *ctx, int tid, int code);
+
+/**
+ * 获取订阅信息
+ * 
+ * @param ctx SIP 上下文
+ * @param subscription_id 订阅 ID
+ * @return 订阅信息指针，NULL 表示不存在
+ */
+SubscriptionInfo* sip_get_subscription(SipContext *ctx, int subscription_id);
+
+/**
+ * 根据设备 ID 和事件类型查找订阅
+ * 
+ * @param ctx SIP 上下文
+ * @param device_id 设备 ID
+ * @param event_type 事件类型（Catalog/Alarm/MobilePosition）
+ * @return 订阅信息指针，NULL 表示不存在
+ */
+SubscriptionInfo* sip_find_subscription(SipContext *ctx, const char *device_id, const char *event_type);
+
+/**
+ * 获取所有订阅信息（填充 PHP 数组）
+ * 
+ * @param ctx SIP 上下文
+ * @param subscriptions_array PHP 数组
+ */
+void sip_get_all_subscriptions(SipContext *ctx, zval *subscriptions_array);
+
+/**
+ * 清理过期订阅
+ * 
+ * @param ctx SIP 上下文
+ */
+void sip_cleanup_expired_subscriptions(SipContext *ctx);
+
+// Task进程主动发送消息到Worker
+int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len);
 
 // 消息解析
 int parse_gb28181_message(const char *xml, GB28181Message *msg);
@@ -380,6 +539,22 @@ void exosip_set_callbacks_wrapper(SipContext *ctx, zval *event_cb, zval *conn_cb
 int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeout_ms);
 int exosip_get_socket_fd(SipContext *ctx);
 int exosip_send_message_wrapper(SipContext *ctx, const char *to, const char *message);
+
+// ==================== Master-Worker-Task API ====================
+int sip_start_master_process(SipContext *ctx);
+void sip_master_loop(SipContext *ctx);
+int sip_fork_worker(SipContext *ctx);
+int sip_fork_task_workers(SipContext *ctx);
+int sip_fork_long_task_workers(SipContext *ctx);
+void sip_long_task_loop(SipContext *ctx, int sockfd);
+void sip_worker_loop(SipContext *ctx);
+void sip_task_loop(SipContext *ctx, int worker_id);
+unsigned long sip_add_task(SipContext *ctx, const char *serialized_data, size_t data_len);
+void sip_handle_task_result(SipContext *ctx, int sockfd);
+void sip_get_process_status(SipContext *ctx, zval *status_array);
+int sip_read_process_status_from_pid(const char *pid_file, zval *status_array);
+
+// ==================== 发送API ====================
 int exosip_send_message_with_content_type(SipContext *ctx, const char *to, const char *message, const char *content_type);
 int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *headers);
 zval* exosip_create_event_object(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session);

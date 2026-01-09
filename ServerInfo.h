@@ -4,7 +4,7 @@
 typedef struct {
     const char *ua;        // User-Agent
     const char *nonce;     
-    const char *ip;        
+    const char *ip;        // 监听IP (可以是 0.0.0.0)
     int port;              
     int rtpPort;           
     const char *sipId;     
@@ -14,6 +14,7 @@ typedef struct {
     int sipExpiry;          
     const char *mode;      // 传输协议模式: "udp", "tcp", "all"
     int debug;             // 调试模式: 0=关闭, 1=开启
+    const char *public_ip; // 公网IP (用于NAT穿透,设置Contact/Via头)
 } ServerInfo;
 
 #endif // SERVERINFO_H

@@ -51,7 +51,8 @@ get_crash_stack.sh
 # ============================================
 # 示例和文档（保留必要的）
 # ============================================
-# 隐藏大型示例项目
+
+docs/GB28181-Service/
 examples/GB28181-Service/
 examples/webrtc-demo/
 examples/protocol/
@@ -98,5 +99,9 @@ test_fix.php
 # ============================================
 # 构建脚本（保留主要的）
 # ============================================
-# 保留：build_macos_fix.sh, build_centos_complete.sh
 link_fix.sh
+
+
+*.txt
+
+.github/

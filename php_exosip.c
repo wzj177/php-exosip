@@ -4,8 +4,13 @@
 #include "php_exosip.h"
 #include "exosip_wrapper.h"
 #include "zend_exceptions.h"
+#include "ext/standard/php_var.h"
+#include "zend_smart_str.h"
 #include <signal.h>
+#include <fcntl.h>
 #include <eXosip2/eXosip.h>
+#include <osipparser2/sdp_message.h>
+#include <osipparser2/osip_list.h>
 
 /* Event extension detection */
 static zend_bool has_event_extension = 0;
@@ -41,6 +46,21 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendmessage, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, contentType, IS_STRING, 1)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendinvite, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, toUri, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, sdp, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendbye, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, callId, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, dialogId, IS_LONG, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendack, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, dialogId, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendresponse, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, tid, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, code, IS_LONG, 0)
@@ -71,6 +91,51 @@ ZEND_END_ARG_INFO()
 
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getstats, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_addtask, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, data, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendtoworker, 0, 0, 1)
+    ZEND_ARG_INFO(0, data)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_startlongtask, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getprocessstatus, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getrunstatus, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, pid_file, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_parsesdp, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, sdp_body, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+/* SUBSCRIBE/NOTIFY arginfo */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_subscribe, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, toUri, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, eventType, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, expires, IS_LONG, 1)
+    ZEND_ARG_TYPE_INFO(0, xmlBody, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_refreshsubscribe, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, subscriptionId, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, expires, IS_LONG, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_cancelsubscribe, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, subscriptionId, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendnotifyresponse, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, tid, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, code, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 /* SipEvent class arginfo */
@@ -111,11 +176,17 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_sipevent_getheader, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sipevent_getsdp, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 /* SipSession class arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipsession_getid, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipsession_getcallid, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sipsession_getdialogid, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipsession_getfromuri, 0, 0, 0)
@@ -232,6 +303,14 @@ PHP_METHOD(SipSession, getCallId) {
     RETURN_NULL();
 }
 
+PHP_METHOD(SipSession, getDialogId) {
+    php_sip_session_obj *obj = php_sip_session_from_obj(Z_OBJ_P(getThis()));
+    if (obj->session_info) {
+        RETURN_LONG(obj->session_info->dialog_id);
+    }
+    RETURN_NULL();
+}
+
 PHP_METHOD(SipSession, getFromUri) {
     php_sip_session_obj *obj = php_sip_session_from_obj(Z_OBJ_P(getThis()));
     if (obj->session_info && strlen(obj->session_info->from_uri) > 0) {  // 修复：检查字符串长度而不是地址
@@ -298,6 +377,7 @@ PHP_METHOD(SipSession, close) {
 const zend_function_entry sip_session_methods[] = {
     PHP_ME(SipSession, getId, arginfo_sipsession_getid, ZEND_ACC_PUBLIC)
     PHP_ME(SipSession, getCallId, arginfo_sipsession_getcallid, ZEND_ACC_PUBLIC)
+    PHP_ME(SipSession, getDialogId, arginfo_sipsession_getdialogid, ZEND_ACC_PUBLIC)
     PHP_ME(SipSession, getFromUri, arginfo_sipsession_getfromuri, ZEND_ACC_PUBLIC)
     PHP_ME(SipSession, getToUri, arginfo_sipsession_gettouri, ZEND_ACC_PUBLIC)
     PHP_ME(SipSession, getState, arginfo_sipsession_getstate, ZEND_ACC_PUBLIC)
@@ -312,6 +392,8 @@ typedef struct _php_sip_event_obj {
     int event_code;      // SIP 事件代码
     int response_code;   // SIP 响应代码 (1xx-6xx)
     int tid;             // 事务ID
+    int call_id;         // Call ID (cid)
+    int dialog_id;       // Dialog ID (did)
     int expires;         // Expires 头值（秒）
     char *from_uri;
     char *to_uri;
@@ -355,6 +437,8 @@ static zend_object *php_sip_event_create_object(zend_class_entry *ce) {
     obj->event_type = 0;
     obj->event_code = 0;
     obj->tid = 0;
+    obj->call_id = 0;
+    obj->dialog_id = 0;
     obj->expires = -1;
     obj->from_uri = NULL;
     obj->to_uri = NULL;
@@ -405,6 +489,7 @@ PHP_METHOD(SipEvent, getRequestUri) {
 
 PHP_METHOD(SipEvent, getBody) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    // fprintf(stderr, "[PHP-DEBUG] getBody called: obj=%p, body=%p\n", obj, obj->body);
     if (obj->body) {
         RETURN_STRING(obj->body);
     }
@@ -413,6 +498,8 @@ PHP_METHOD(SipEvent, getBody) {
 
 PHP_METHOD(SipEvent, getContentType) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    fprintf(stderr, "[PHP-DEBUG] getContentType called: obj=%p, content_type=%p (%s)\n", 
+            obj, obj->content_type, obj->content_type ? obj->content_type : "NULL");
     if (obj->content_type) {
         RETURN_STRING(obj->content_type);
     }
@@ -422,6 +509,16 @@ PHP_METHOD(SipEvent, getContentType) {
 PHP_METHOD(SipEvent, getTid) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
     RETURN_LONG(obj->tid);
+}
+
+PHP_METHOD(SipEvent, getCallId) {
+    php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    RETURN_LONG(obj->call_id);
+}
+
+PHP_METHOD(SipEvent, getDialogId) {
+    php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    RETURN_LONG(obj->dialog_id);
 }
 
 PHP_METHOD(SipEvent, getExpires) {
@@ -467,6 +564,233 @@ PHP_METHOD(SipEvent, getHeader) {
     RETURN_NULL();
 }
 
+PHP_METHOD(SipEvent, getSdp) {
+    php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    
+    // 如果 body 存在且 content_type 是 application/sdp，则解析
+    if (!obj->body || !obj->content_type) {
+        RETURN_NULL();
+    }
+    
+    // 检查 Content-Type 是否是 SDP
+    if (strstr(obj->content_type, "application/sdp") == NULL) {
+        RETURN_NULL();
+    }
+    
+    size_t body_len = strlen(obj->body);
+    
+    // GB28181 扩展字段存储
+    char gb28181_y[128] = {0};  // y= SSRC
+    char gb28181_f[256] = {0};  // f= f参数
+    
+    // GB28181 兼容性处理：提取并移除非标准字段 (y=, f=)
+    // osip2 是严格的 RFC 4566 解析器，不支持私有扩展
+    // 策略：逐行扫描，检测 y= 和 f= 行并跳过
+    char *cleaned_sdp = (char*)emalloc(body_len + 1);
+    const char *read_pos = obj->body;
+    char *write_pos = cleaned_sdp;
+    
+    while (*read_pos) {
+        const char *line_start = read_pos;
+        
+        // 找到行尾
+        while (*read_pos && *read_pos != '\r' && *read_pos != '\n') {
+            read_pos++;
+        }
+        
+        size_t line_len = read_pos - line_start;
+        int skip_line = 0;
+        
+        // 检查是否是 GB28181 私有字段（至少2字符：x=）
+        if (line_len >= 2 && line_start[1] == '=') {
+            if (line_start[0] == 'y') {
+                // y=0100000001
+                skip_line = 1;
+                size_t value_len = line_len - 2;
+                if (value_len > 0 && value_len < sizeof(gb28181_y)) {
+                    memcpy(gb28181_y, line_start + 2, value_len);
+                    gb28181_y[value_len] = '\0';
+                }
+            } else if (line_start[0] == 'f') {
+                // f= 或 f=v/////a/1/2/3
+                skip_line = 1;
+                size_t value_len = line_len - 2;
+                if (value_len > 0 && value_len < sizeof(gb28181_f)) {
+                    memcpy(gb28181_f, line_start + 2, value_len);
+                    gb28181_f[value_len] = '\0';
+                }
+            }
+        }
+        
+        // 如果不跳过，复制整行到输出
+        if (!skip_line && line_len > 0) {
+            memcpy(write_pos, line_start, line_len);
+            write_pos += line_len;
+        }
+        
+        // 处理换行符（如果不跳过此行，也复制换行符）
+        if (*read_pos == '\r') {
+            if (!skip_line) {
+                *write_pos++ = '\r';
+            }
+            read_pos++;
+            if (*read_pos == '\n') {
+                if (!skip_line) {
+                    *write_pos++ = '\n';
+                }
+                read_pos++;
+            }
+        } else if (*read_pos == '\n') {
+            if (!skip_line) {
+                *write_pos++ = '\n';
+            }
+            read_pos++;
+        }
+    }
+    
+    *write_pos = '\0';
+    
+    // 使用 osip2 原生 SDP 解析器
+    sdp_message_t *sdp = NULL;
+    int ret = sdp_message_init(&sdp);
+    
+    if (ret != 0 || sdp == NULL) {
+        efree(cleaned_sdp);
+        RETURN_NULL();
+    }
+    
+    // 解析清理后的 SDP 字符串
+    ret = sdp_message_parse(sdp, cleaned_sdp);
+    efree(cleaned_sdp);
+    
+    if (ret != 0) {
+        sdp_message_free(sdp);
+        RETURN_NULL();
+    }
+    
+    // 创建返回数组（复用 parseSdp 的逻辑）
+    array_init(return_value);
+    
+    // 提取 v= (version)
+    char *version = sdp_message_v_version_get(sdp);
+    if (version) {
+        add_assoc_string(return_value, "version", version);
+    }
+    
+    // 提取 o= (origin)
+    char *o_username = sdp_message_o_username_get(sdp);
+    char *o_sess_id = sdp_message_o_sess_id_get(sdp);
+    char *o_sess_version = sdp_message_o_sess_version_get(sdp);
+    char *o_nettype = sdp_message_o_nettype_get(sdp);
+    char *o_addrtype = sdp_message_o_addrtype_get(sdp);
+    char *o_addr = sdp_message_o_addr_get(sdp);
+    
+    if (o_username || o_sess_id || o_addr) {
+        zval origin;
+        array_init(&origin);
+        if (o_username) add_assoc_string(&origin, "username", o_username);
+        if (o_sess_id) add_assoc_string(&origin, "session_id", o_sess_id);
+        if (o_sess_version) add_assoc_string(&origin, "session_version", o_sess_version);
+        if (o_nettype) add_assoc_string(&origin, "nettype", o_nettype);
+        if (o_addrtype) add_assoc_string(&origin, "addrtype", o_addrtype);
+        if (o_addr) add_assoc_string(&origin, "addr", o_addr);
+        add_assoc_zval(return_value, "origin", &origin);
+    }
+    
+    // 提取 s= (session name)
+    char *s_name = sdp_message_s_name_get(sdp);
+    if (s_name) {
+        add_assoc_string(return_value, "session_name", s_name);
+    }
+    
+    // 提取 c= (connection)
+    sdp_connection_t *conn = sdp_message_connection_get(sdp, 0, 0);
+    if (conn && conn->c_addr) {
+        zval connection;
+        array_init(&connection);
+        if (conn->c_nettype) add_assoc_string(&connection, "nettype", conn->c_nettype);
+        if (conn->c_addrtype) add_assoc_string(&connection, "addrtype", conn->c_addrtype);
+        if (conn->c_addr) add_assoc_string(&connection, "addr", conn->c_addr);
+        add_assoc_zval(return_value, "connection", &connection);
+    }
+    
+    // 提取 m= (medias)
+    zval medias;
+    array_init(&medias);
+    
+    int media_pos = 0;
+    sdp_media_t *media = NULL;
+    
+    while ((media = (sdp_media_t*)osip_list_get(&sdp->m_medias, media_pos)) != NULL) {
+        zval media_arr;
+        array_init(&media_arr);
+        
+        if (media->m_media) add_assoc_string(&media_arr, "media", media->m_media);
+        if (media->m_port) add_assoc_string(&media_arr, "port", media->m_port);
+        if (media->m_proto) add_assoc_string(&media_arr, "proto", media->m_proto);
+        
+        // Payloads
+        zval payloads;
+        array_init(&payloads);
+        int payload_pos = 0;
+        char *payload = NULL;
+        while ((payload = (char*)osip_list_get(&media->m_payloads, payload_pos)) != NULL) {
+            add_next_index_string(&payloads, payload);
+            payload_pos++;
+        }
+        add_assoc_zval(&media_arr, "payloads", &payloads);
+        
+        // Media connection
+        sdp_connection_t *media_conn = (sdp_connection_t*)osip_list_get(&media->c_connections, 0);
+        if (media_conn && media_conn->c_addr) {
+            zval m_conn;
+            array_init(&m_conn);
+            if (media_conn->c_nettype) add_assoc_string(&m_conn, "nettype", media_conn->c_nettype);
+            if (media_conn->c_addrtype) add_assoc_string(&m_conn, "addrtype", media_conn->c_addrtype);
+            if (media_conn->c_addr) add_assoc_string(&m_conn, "addr", media_conn->c_addr);
+            add_assoc_zval(&media_arr, "connection", &m_conn);
+        }
+        
+        // Attributes
+        zval attributes;
+        array_init(&attributes);
+        int attr_pos = 0;
+        sdp_attribute_t *attr = NULL;
+        while ((attr = (sdp_attribute_t*)osip_list_get(&media->a_attributes, attr_pos)) != NULL) {
+            if (attr->a_att_field) {
+                if (attr->a_att_value) {
+                    add_assoc_string(&attributes, attr->a_att_field, attr->a_att_value);
+                } else {
+                    add_assoc_null(&attributes, attr->a_att_field);
+                }
+            }
+            attr_pos++;
+        }
+        add_assoc_zval(&media_arr, "attributes", &attributes);
+        
+        add_next_index_zval(&medias, &media_arr);
+        media_pos++;
+    }
+    
+    add_assoc_zval(return_value, "medias", &medias);
+    
+    // 添加 GB28181 扩展字段
+    if (gb28181_y[0] != '\0' || gb28181_f[0] != '\0') {
+        zval gb28181;
+        array_init(&gb28181);
+        if (gb28181_y[0] != '\0') {
+            add_assoc_string(&gb28181, "ssrc", gb28181_y);
+        }
+        if (gb28181_f[0] != '\0') {
+            add_assoc_string(&gb28181, "f", gb28181_f);
+        }
+        add_assoc_zval(return_value, "gb28181", &gb28181);
+    }
+    
+    // 清理
+    sdp_message_free(sdp);
+}
+
 const zend_function_entry sip_event_methods[] = {
     PHP_ME(SipEvent, getType, arginfo_sipevent_gettype, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getCode, arginfo_sipevent_getcode, ZEND_ACC_PUBLIC)
@@ -476,10 +800,13 @@ const zend_function_entry sip_event_methods[] = {
     PHP_ME(SipEvent, getBody, arginfo_sipevent_getbody, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getContentType, arginfo_sipevent_getcontenttype, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getTid, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
+    PHP_ME(SipEvent, getCallId, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
+    PHP_ME(SipEvent, getDialogId, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getExpires, arginfo_sipevent_getexpires, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getSession, arginfo_sipevent_getsession, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getConnection, arginfo_sipevent_getconnection, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getHeader, arginfo_sipevent_getheader, ZEND_ACC_PUBLIC)
+    PHP_ME(SipEvent, getSdp, arginfo_sipevent_getsdp, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -519,6 +846,12 @@ typedef struct _php_exosip_obj {
     /* Timer Support (Single-threaded Event Loop) */
     zval onTimer;        // 定时器回调
     
+    /* Master-Worker-Task Support */
+    zval onWorkerStart;  // Worker 进程启动回调
+    zval onTask;         // Task 进程回调
+    zval onTaskFinish;   // Task 完成回调（Worker 进程）
+    zval onPipeMessage;  // Pipe 消息回调（Task→Worker主动推送）
+    
     /* Universal SIP Configuration */
     HashTable *config;   // 服务器配置参数
     
@@ -532,6 +865,7 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
 static const char* php_exosip_get_event_type_name(int event_type, osip_message_t *request);
 static zval* php_exosip_get_event_callback(php_exosip_obj *obj, const char *event_type);
 static zval php_exosip_call_event_handler(zval *callback, zval *event_obj);
+static void php_exosip_call_error_handler(php_exosip_obj *obj, const char *error_msg);
 static void php_exosip_signal_handler(int sig);
 static void php_exosip_parse_session_data(php_sip_event_obj *event_obj, zval *session_data);
 
@@ -627,6 +961,13 @@ static void php_exosip_free_obj(zend_object *object) {
         /* Connection management */
         SAFE_ZVAL_DTOR(obj->onConnect);
         SAFE_ZVAL_DTOR(obj->onClose);
+        SAFE_ZVAL_DTOR(obj->onTimer);
+        
+        /* Master-Worker-Task */
+        SAFE_ZVAL_DTOR(obj->onWorkerStart);
+        SAFE_ZVAL_DTOR(obj->onTask);
+        SAFE_ZVAL_DTOR(obj->onTaskFinish);
+        SAFE_ZVAL_DTOR(obj->onPipeMessage);
         
         #undef SAFE_ZVAL_DTOR
     }
@@ -680,6 +1021,12 @@ static zval *exosip_read_property(zend_object *object, zend_string *member, int 
     /* Timer support */
     if (strcmp(prop_name, "onTimer") == 0) return &obj->onTimer;
     
+    /* Master-Worker-Task */
+    if (strcmp(prop_name, "onWorkerStart") == 0) return &obj->onWorkerStart;
+    if (strcmp(prop_name, "onTask") == 0) return &obj->onTask;
+    if (strcmp(prop_name, "onTaskFinish") == 0) return &obj->onTaskFinish;
+    if (strcmp(prop_name, "onPipeMessage") == 0) return &obj->onPipeMessage;
+    
     return zend_std_read_property(object, member, type, cache_slot, rv);
 }
 
@@ -719,13 +1066,19 @@ static zval *exosip_write_property(zend_object *object, zend_string *member, zva
         ZVAL_COPY(&obj->onTimer, value); 
         // 设置到 C 层定时器
         if (obj->ctx) {
-            // 从 config 中获取 timerInterval，默认 1000ms
-            zval *interval_val = zend_hash_str_find(obj->config, "timerInterval", 13);
+            // 从 config 中获取 timer_interval，默认 1000ms
+            zval *interval_val = zend_hash_str_find(obj->config, "timer_interval", 14);
             int interval_ms = (interval_val && Z_TYPE_P(interval_val) == IS_LONG) ? Z_LVAL_P(interval_val) : 1000;
             sip_set_timer_callback(obj->ctx, value, interval_ms);
         }
         return &obj->onTimer; 
     }
+    
+    /* Master-Worker-Task */
+    if (strcmp(prop_name, "onWorkerStart") == 0) { ZVAL_COPY(&obj->onWorkerStart, value); return &obj->onWorkerStart; }
+    if (strcmp(prop_name, "onTask") == 0) { ZVAL_COPY(&obj->onTask, value); return &obj->onTask; }
+    if (strcmp(prop_name, "onTaskFinish") == 0) { ZVAL_COPY(&obj->onTaskFinish, value); return &obj->onTaskFinish; }
+    if (strcmp(prop_name, "onPipeMessage") == 0) { ZVAL_COPY(&obj->onPipeMessage, value); return &obj->onPipeMessage; }
     
     return zend_std_write_property(object, member, value, cache_slot);
 }
@@ -762,6 +1115,10 @@ static zend_object *php_exosip_create_object(zend_class_entry *ce) {
     ZVAL_UNDEF(&obj->onConnect);
     ZVAL_UNDEF(&obj->onClose);
     ZVAL_UNDEF(&obj->onTimer);  // 定时器回调
+    ZVAL_UNDEF(&obj->onWorkerStart);  // Worker启动回调
+    ZVAL_UNDEF(&obj->onTask);
+    ZVAL_UNDEF(&obj->onTaskFinish);
+    ZVAL_UNDEF(&obj->onPipeMessage);
     
     return &obj->std;
 }
@@ -825,12 +1182,45 @@ PHP_METHOD(ExoSip, __construct) {
         val = zend_hash_str_find(Z_ARRVAL_P(configArr), "debug", 5);
         info.debug = (val && (Z_TYPE_P(val) == IS_TRUE || (Z_TYPE_P(val) == IS_LONG && Z_LVAL_P(val)))) ? 1 : 0;
 
-        // 尝试初始化，捕获可能的错误
-        obj->ctx = exosip_init_wrapper(&info);
-        if (!obj->ctx) {
-            php_error_docref(NULL, E_WARNING, "Failed to init eXosip in constructor - port %d may be in use", info.port);
-            // 注意：不要抛出异常，让对象创建成功但ctx为NULL
-            // 用户可以稍后调用init()重试
+        // Read task_worker_num config (before init)
+        val = zend_hash_str_find(Z_ARRVAL_P(configArr), "task_worker_num", 15);
+        int task_worker_num = (val && Z_TYPE_P(val) == IS_LONG) ? Z_LVAL_P(val) : 0;
+        
+        // 读取 long_task_worker_num 配置（默认1个）
+        val = zend_hash_str_find(Z_ARRVAL_P(configArr), "long_task_worker_num", 20);
+        int long_task_worker_num = (val && Z_TYPE_P(val) == IS_LONG) ? Z_LVAL_P(val) : 1;
+        
+        // 如果是多进程模式，延迟初始化（在 Worker 进程中初始化）
+        if (task_worker_num > 0 || long_task_worker_num > 0) {
+            // 只创建空的 SipContext，不绑定端口
+            obj->ctx = (SipContext*)calloc(1, sizeof(SipContext));
+            if (!obj->ctx) {
+                php_error_docref(NULL, E_ERROR, "Failed to allocate SipContext");
+                return;
+            }
+            
+            // 保存配置，稍后在 Worker 中初始化
+            obj->ctx->server_info = info;
+            obj->ctx->task_count = task_worker_num;
+            obj->ctx->long_task_count = long_task_worker_num;
+            obj->ctx->running = 0; // 标记未初始化
+            
+            // 读取 pid_file 配置
+            val = zend_hash_str_find(Z_ARRVAL_P(configArr), "pid_file", 8);
+            if (val && Z_TYPE_P(val) == IS_STRING) {
+                strncpy(obj->ctx->pid_file, Z_STRVAL_P(val), sizeof(obj->ctx->pid_file) - 1);
+            } else {
+                snprintf(obj->ctx->pid_file, sizeof(obj->ctx->pid_file), "/tmp/php_exosip_%d.pid", info.port);
+            }
+            
+            php_printf("[INFO] Multi-process mode enabled, eXosip will be initialized in Worker process\n");
+            php_printf("[INFO] PID file: %s\n", obj->ctx->pid_file);
+        } else {
+            // 单进程模式：立即初始化
+            obj->ctx = exosip_init_wrapper(&info);
+            if (!obj->ctx) {
+                php_error_docref(NULL, E_WARNING, "Failed to init eXosip in constructor - port %d may be in use", info.port);
+            }
         }
     }
 }
@@ -887,6 +1277,10 @@ PHP_METHOD(ExoSip, init) {
     val = zend_hash_str_find(Z_ARRVAL_P(configArr), "debug", 5);
     info.debug = (val && (Z_TYPE_P(val) == IS_TRUE || (Z_TYPE_P(val) == IS_LONG && Z_LVAL_P(val)))) ? 1 : 0;
 
+    // 🔥 读取公网IP配置 (用于NAT穿透)
+    val = zend_hash_str_find(Z_ARRVAL_P(configArr), "public_ip", 9);
+    info.public_ip = (val && Z_TYPE_P(val) == IS_STRING) ? Z_STRVAL_P(val) : "";
+
     php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
     obj->ctx = exosip_init_wrapper(&info);
     if (!obj->ctx) {
@@ -894,6 +1288,15 @@ PHP_METHOD(ExoSip, init) {
                          info.mode, info.port, info.ip);
         RETURN_FALSE;
     }
+    
+    // 读取 Worker/Task 配置
+    val = zend_hash_str_find(Z_ARRVAL_P(configArr), "task_worker_num", 15);
+    obj->ctx->task_count = (val && Z_TYPE_P(val) == IS_LONG) ? (int)Z_LVAL_P(val) : 4;
+    
+    val = zend_hash_str_find(Z_ARRVAL_P(configArr), "long_task_worker_num", 20);
+    obj->ctx->long_task_count = (val && Z_TYPE_P(val) == IS_LONG) ? (int)Z_LVAL_P(val) : 1;  // 默认 1
+    
+    fprintf(stderr, "[DEBUG] init(): Set task_count=%d, long_task_count=%d\n", obj->ctx->task_count, obj->ctx->long_task_count);
     
     // Set global context for session close operations
     global_sip_ctx = obj->ctx;
@@ -969,8 +1372,18 @@ PHP_METHOD(ExoSip, processEvents) {
                 event_obj->event_type = Z_LVAL_P(val);
             }
             
-            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "ss_status", 9)) != NULL) {
+            // 修复: 从 status_code 读取响应码,而不是 ss_status
+            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "status_code", 11)) != NULL) {
                 event_obj->event_code = Z_LVAL_P(val);
+            }
+            
+            // 添加: 读取 call_id 和 dialog_id
+            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "cid", 3)) != NULL) {
+                event_obj->call_id = Z_LVAL_P(val);
+            }
+            
+            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "did", 3)) != NULL) {
+                event_obj->dialog_id = Z_LVAL_P(val);
             }
             
             if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "from_uri", 8)) != NULL) {
@@ -994,6 +1407,13 @@ PHP_METHOD(ExoSip, processEvents) {
             if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "body", 4)) != NULL) {
                 if (Z_TYPE_P(val) == IS_STRING) {
                     event_obj->body = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
+                }
+            }
+            
+            // 读取 content_type
+            if ((val = zend_hash_str_find(Z_ARRVAL_P(event_data), "content_type", 12)) != NULL) {
+                if (Z_TYPE_P(val) == IS_STRING) {
+                    event_obj->content_type = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
                 }
             }
             
@@ -1057,7 +1477,343 @@ PHP_METHOD(ExoSip, run) {
         RETURN_FALSE;
     }
 
-    // 启动通用SIP服务器事件循环
+    // Check if Master-Worker-Task mode is enabled
+    if (obj->ctx->task_count > 0 || obj->ctx->long_task_count > 0) {
+        // 绑定 Task 回调到 SipContext（在 fork 前）
+        if (!Z_ISUNDEF(obj->onTask)) {
+            ZVAL_COPY(&obj->ctx->task_callback, &obj->onTask);
+            if (obj->ctx->server_info.debug) {
+                php_printf("[DEBUG] onTask callback set before fork\n");
+            }
+        } else if (obj->ctx->server_info.debug) {
+            php_printf("[DEBUG] onTask callback is not set\n");
+        }
+        if (!Z_ISUNDEF(obj->onTaskFinish)) {
+            ZVAL_COPY(&obj->ctx->task_finish_callback, &obj->onTaskFinish);
+            if (obj->ctx->server_info.debug) {
+                php_printf("[DEBUG] onTaskFinish callback set before fork\n");
+            }
+        } else if (obj->ctx->server_info.debug) {
+            php_printf("[DEBUG] onTaskFinish callback is not set\n");
+        }
+        if (!Z_ISUNDEF(obj->onPipeMessage)) {
+            ZVAL_COPY(&obj->ctx->pipe_message_callback, &obj->onPipeMessage);
+            if (obj->ctx->server_info.debug) {
+                php_printf("[DEBUG] onPipeMessage callback set before fork\n");
+            }
+        } else if (obj->ctx->server_info.debug) {
+            php_printf("[DEBUG] onPipeMessage callback is not set\n");
+        }
+        
+        if (sip_start_master_process(obj->ctx) < 0) {
+            php_error_docref(NULL, E_WARNING, "Failed to start Master process");
+            RETURN_FALSE;
+        }
+        
+        if (obj->ctx->is_master) {
+            php_printf("[Master] SIP Server started with %d Task workers\n", obj->ctx->task_count);
+            sip_master_loop(obj->ctx);
+            RETURN_TRUE;
+        }
+        
+        // Task processes: they are already in sip_task_loop()
+        if (obj->ctx->is_task) {
+            // This code path should not be reached as Task processes call _exit() in sip_task_loop
+            RETURN_TRUE;
+        }
+        
+        // Worker process: initialize eXosip and use dedicated event loop
+        if (obj->ctx->is_worker) {
+            php_printf("[Worker] Initializing eXosip and entering SIP event loop (PID=%d)\n", getpid());
+            
+            // Worker 进程：初始化 eXosip（绑定端口）
+            struct eXosip_t *exosip_ctx = eXosip_malloc();
+            if (!exosip_ctx) {
+                php_error_docref(NULL, E_ERROR, "[Worker] eXosip_malloc() failed");
+                RETURN_FALSE;
+            }
+            
+            if (eXosip_init(exosip_ctx) != 0) {
+                php_error_docref(NULL, E_ERROR, "[Worker] eXosip_init() failed");
+                RETURN_FALSE;
+            }
+            
+            // 设置 User-Agent
+            eXosip_set_user_agent(exosip_ctx, obj->ctx->server_info.ua);
+            
+            // 监听端口
+            const char *mode = obj->ctx->server_info.mode;
+            int transport = IPPROTO_UDP;
+            if (strcmp(mode, "tcp") == 0) transport = IPPROTO_TCP;
+            else if (strcmp(mode, "tls") == 0) transport = IPPROTO_TCP; // TLS 需要额外配置
+            
+            int ret = eXosip_listen_addr(exosip_ctx, transport, 
+                                          obj->ctx->server_info.ip, 
+                                          obj->ctx->server_info.port, 
+                                          AF_INET, 0);
+            if (ret != 0) {
+                php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d",
+                    obj->ctx->server_info.ip, obj->ctx->server_info.port);
+                RETURN_FALSE;
+            }
+            
+            // 关键修复: 设置公网IP用于 Contact 和 Via 头
+            // 优先级: public_ip 配置 > 自动检测 > 监听IP
+            const char *masquerade_ip = NULL;
+            
+            if (obj->ctx->server_info.public_ip && strlen(obj->ctx->server_info.public_ip) > 0) {
+                // 使用配置的公网IP
+                masquerade_ip = obj->ctx->server_info.public_ip;
+                php_printf("[Worker] Using configured public IP for Contact/Via headers: %s:%d\n",
+                    masquerade_ip, obj->ctx->server_info.port);
+            } else if (strcmp(obj->ctx->server_info.ip, "0.0.0.0") == 0) {
+                // 自动检测本地IP
+                static char local_ip[256] = {0};
+                FILE *fp = popen("ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -1", "r");
+                if (fp) {
+                    if (fgets(local_ip, sizeof(local_ip), fp) != NULL) {
+                        local_ip[strcspn(local_ip, "\n")] = 0; // 移除换行符
+                        if (strlen(local_ip) > 0) {
+                            masquerade_ip = local_ip;
+                            php_printf("[Worker] Auto-detected local IP for Contact/Via headers: %s:%d\n",
+                                masquerade_ip, obj->ctx->server_info.port);
+                        }
+                    }
+                    pclose(fp);
+                }
+            } else {
+                // 使用监听IP
+                masquerade_ip = obj->ctx->server_info.ip;
+                php_printf("[Worker] Using listen IP for Contact/Via headers: %s:%d\n",
+                    masquerade_ip, obj->ctx->server_info.port);
+            }
+            
+            // 设置 masquerade contact
+            if (masquerade_ip != NULL) {
+                eXosip_masquerade_contact(exosip_ctx, masquerade_ip, obj->ctx->server_info.port);
+            }
+            
+            obj->ctx->ctx = exosip_ctx;
+            obj->ctx->running = 1;
+            
+            php_printf("[Worker] eXosip listening on %s:%d (%s)\n",
+                obj->ctx->server_info.ip, obj->ctx->server_info.port, mode);
+            
+            // Save original signal handlers
+            struct sigaction old_sigint, old_sigterm;
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = php_exosip_signal_handler;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            
+            sigaction(SIGINT, &sa, &old_sigint);
+            sigaction(SIGTERM, &sa, &old_sigterm);
+            
+            // Worker process: process SIP events
+            obj->ctx->running = 1;
+            obj->is_running = 1;
+            
+            php_exosip_register_instance(obj);
+            
+            // 触发 onWorkerStart 回调
+            if (!Z_ISUNDEF(obj->onWorkerStart) && Z_TYPE(obj->onWorkerStart) == IS_OBJECT) {
+                php_printf("[Worker] Calling onWorkerStart callback\n");
+                
+                zend_try {
+                    zval result;
+                    zval params[1];
+                    ZVAL_OBJ(&params[0], Z_OBJ_P(getThis()));
+                    Z_ADDREF(params[0]);
+                    
+                    if (call_user_function(EG(function_table), NULL, &obj->onWorkerStart, &result, 1, params) == SUCCESS) {
+                        zval_ptr_dtor(&result);
+                    }
+                    
+                    zval_ptr_dtor(&params[0]);
+                } zend_catch {
+                    php_error_docref(NULL, E_WARNING, "[Worker] onWorkerStart callback threw exception");
+                } zend_end_try();
+            }
+            
+            while (obj->ctx->running && obj->is_running) {
+                // Get SIP events (non-blocking, 100ms timeout)
+                zval events_array;
+                int event_count = exosip_get_events_nonblocking(obj->ctx, &events_array, 100);
+                
+                if (event_count < 0) {
+                    php_error_docref(NULL, E_WARNING, "[Worker] Failed to get SIP events");
+                    break;
+                }
+                
+                if (event_count > 0) {
+                    HashTable *events_ht = Z_ARRVAL(events_array);
+                    zval *event_data;
+                    
+                    ZEND_HASH_FOREACH_VAL(events_ht, event_data) {
+                        zval sip_event_obj;
+                        object_init_ex(&sip_event_obj, sip_event_ce);
+                        php_sip_event_obj *event_obj = php_sip_event_from_obj(Z_OBJ(sip_event_obj));
+                        
+                        if (!php_exosip_parse_event_data(event_obj, event_data)) {
+                            zval_ptr_dtor(&sip_event_obj);
+                            continue;
+                        }
+                        
+                        zval *method_val = zend_hash_str_find(Z_ARRVAL_P(event_data), "method", 6);
+                        osip_message_t *dummy_request = NULL;
+                        const char* event_type = php_exosip_get_event_type_name(event_obj->event_type, dummy_request);
+                        
+                        if (event_obj->event_type == EXOSIP_MESSAGE_NEW && method_val && Z_TYPE_P(method_val) == IS_STRING) {
+                            const char *method = Z_STRVAL_P(method_val);
+                            if (strcmp(method, "REGISTER") == 0) {
+                                event_type = "register";
+                            } else if (strcmp(method, "MESSAGE") == 0) {
+                                event_type = "message";
+                            }
+                        }
+                        
+                        zval *callback = php_exosip_get_event_callback(obj, event_type);
+                        
+                        if (callback) {
+                            Z_TRY_ADDREF(sip_event_obj);
+                            
+                            zend_try {
+                                // 清除之前可能残留的异常
+                                if (EG(exception)) {
+                                    zend_clear_exception();
+                                }
+                                
+                                zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
+                                
+                                // 检查是否有异常产生
+                                if (EG(exception)) {
+                                    // 获取异常信息
+                                    zend_object *exception_obj = EG(exception);
+                                    char error_buffer[1024];
+                                    const char *error_msg = "Unknown error";
+                                    
+                                    if (exception_obj) {
+                                        zend_class_entry *ce = exception_obj->ce;
+                                        
+                                        // 尝试获取异常消息
+                                        zval rv;
+                                        zval *message = zend_read_property(ce, exception_obj, "message", sizeof("message")-1, 0, &rv);
+                                        
+                                        if (message && Z_TYPE_P(message) == IS_STRING && Z_STRLEN_P(message) > 0) {
+                                            snprintf(error_buffer, sizeof(error_buffer), "%s: %s", 
+                                                    ZSTR_VAL(ce->name), Z_STRVAL_P(message));
+                                            error_msg = error_buffer;
+                                        } else {
+                                            snprintf(error_buffer, sizeof(error_buffer), "%s", ZSTR_VAL(ce->name));
+                                            error_msg = error_buffer;
+                                        }
+                                        
+                                        // 如果有文件和行号信息,也包含进来
+                                        zval *file = zend_read_property(ce, exception_obj, "file", sizeof("file")-1, 0, &rv);
+                                        zval *line = zend_read_property(ce, exception_obj, "line", sizeof("line")-1, 0, &rv);
+                                        
+                                        if (file && Z_TYPE_P(file) == IS_STRING && line && Z_TYPE_P(line) == IS_LONG) {
+                                            char temp_buffer[1024];
+                                            snprintf(temp_buffer, sizeof(temp_buffer), "%s in %s:%ld", 
+                                                    error_buffer, Z_STRVAL_P(file), Z_LVAL_P(line));
+                                            strncpy(error_buffer, temp_buffer, sizeof(error_buffer)-1);
+                                            error_buffer[sizeof(error_buffer)-1] = '\0';
+                                        }
+                                    }
+                                    
+                                    php_printf("[Worker] Event callback error: %s\n", error_msg);
+                                    
+                                    // 调用 onError 回调
+                                    php_exosip_call_error_handler(obj, error_msg);
+                                    
+                                    zend_clear_exception();
+                                } else if (Z_TYPE(result) == IS_FALSE) {
+                                    php_printf("[Worker] Server shutdown requested\n");
+                                    obj->is_running = 0;
+                                    obj->ctx->running = 0;
+                                }
+                                
+                                if (!Z_ISUNDEF(result)) {
+                                    zval_ptr_dtor(&result);
+                                }
+                            } zend_catch {
+                                php_printf("[Worker] Event callback bailout caught, continuing...\n");
+                                // 调用 onError 回调
+                                php_exosip_call_error_handler(obj, "Fatal error in event callback");
+                                // 清除异常状态
+                                if (EG(exception)) {
+                                    zend_clear_exception();
+                                }
+                            } zend_end_try();
+                        }
+                        
+                        zval_ptr_dtor(&sip_event_obj);
+                    } ZEND_HASH_FOREACH_END();
+                    
+                    zval_ptr_dtor(&events_array);
+                }
+                
+                // Check timer (with exception protection)
+                if (obj->ctx->timer_interval_ms > 0 && sip_check_and_fire_timer(obj->ctx)) {
+                    if (Z_TYPE(obj->onTimer) == IS_OBJECT) {
+                        zval result;
+                        zval args[0];
+                        
+                        zend_try {
+                            // 清除之前可能残留的异常
+                            if (EG(exception)) {
+                                zend_clear_exception();
+                            }
+                            
+                            if (call_user_function(NULL, &obj->onTimer, &obj->onTimer, &result, 0, args) == SUCCESS) {
+                                // 检查是否有异常产生
+                                if (EG(exception)) {
+                                    php_printf("[Worker] Timer callback generated exception, clearing and continuing...\\n");
+                                    zend_clear_exception();
+                                } else if (Z_TYPE(result) == IS_FALSE) {
+                                    obj->is_running = 0;
+                                    obj->ctx->running = 0;
+                                }
+                                
+                                if (!Z_ISUNDEF(result)) {
+                                    zval_ptr_dtor(&result);
+                                }
+                            }
+                        } zend_catch {
+                            php_printf("[Worker] Timer callback bailout caught, continuing...\\n");
+                            // 清除异常状态
+                            if (EG(exception)) {
+                                zend_clear_exception();
+                            }
+                        } zend_end_try();
+                    }
+                }
+                
+                // 每次循环都检查 Task/Long Task 消息（不依赖 SIP 事件）
+                // Check Task results
+                for (int i = 0; i < obj->ctx->task_count; i++) {
+                    sip_handle_task_result(obj->ctx, obj->ctx->task_sockfds[i]);
+                }
+                
+                // Check Long Task results (sendToWorker from Long Task)
+                for (int i = 0; i < obj->ctx->long_task_count; i++) {
+                    if (obj->ctx->long_task_sockfds[i] >= 0) {
+                        sip_handle_task_result(obj->ctx, obj->ctx->long_task_sockfds[i]);
+                    }
+                }
+            }
+            
+            php_printf("[Worker] Exiting event loop\n");
+            
+            // Worker 退出前从实例列表中移除（防止信号处理器访问野指针）
+            php_exosip_unregister_instance(obj);
+            
+            RETURN_TRUE;
+        }
+    }
+
+    // Single-process mode: 启动通用SIP服务器事件循环
     obj->ctx->running = 1;
     obj->is_running = 1;
     
@@ -1135,15 +1891,20 @@ PHP_METHOD(ExoSip, run) {
                     // 注意：回调函数会接收对象的引用，需要增加引用计数
                     Z_TRY_ADDREF(sip_event_obj);
                     
-                    zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
-                    
-                    // 检查回调返回值，false表示停止服务器
-                    if (Z_TYPE(result) == IS_FALSE) {
-                        php_printf("Server shutdown requested by event handler\n");
-                        obj->is_running = 0;
-                        obj->ctx->running = 0;
-                    }
-                    zval_ptr_dtor(&result);
+                    zend_try {
+                        zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
+                        
+                        // 检查回调返回值，false表示停止服务器
+                        if (Z_TYPE(result) == IS_FALSE) {
+                            php_printf("Server shutdown requested by event handler\n");
+                            obj->is_running = 0;
+                            obj->ctx->running = 0;
+                        }
+                        zval_ptr_dtor(&result);
+                    } zend_catch {
+                        php_error_docref(NULL, E_WARNING, "Event callback threw an exception, continuing...");
+                        // 继续运行,不崩溃
+                    } zend_end_try();
                 } else {
                     // 没有设置回调，输出调试信息（包含原始事件类型值便于调试）
                     php_printf(" Unhandled SIP event: %s (type=%d) from %s\n", 
@@ -1230,6 +1991,16 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
         event_obj->tid = Z_LVAL_P(val);
     }
     
+    // Parse call ID
+    if ((val = zend_hash_str_find(ht, "cid", 3)) != NULL && Z_TYPE_P(val) == IS_LONG) {
+        event_obj->call_id = Z_LVAL_P(val);
+    }
+    
+    // Parse dialog ID
+    if ((val = zend_hash_str_find(ht, "did", 3)) != NULL && Z_TYPE_P(val) == IS_LONG) {
+        event_obj->dialog_id = Z_LVAL_P(val);
+    }
+    
     // Parse Expires header
     if ((val = zend_hash_str_find(ht, "expires", 7)) != NULL && Z_TYPE_P(val) == IS_LONG) {
         event_obj->expires = Z_LVAL_P(val);
@@ -1238,6 +2009,10 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
     // Parse response code
     if ((val = zend_hash_str_find(ht, "code", 4)) != NULL && Z_TYPE_P(val) == IS_LONG) {
         event_obj->response_code = Z_LVAL_P(val);
+        event_obj->event_code = Z_LVAL_P(val);
+    } else if ((val = zend_hash_str_find(ht, "status_code", 11)) != NULL && Z_TYPE_P(val) == IS_LONG) {
+        event_obj->response_code = Z_LVAL_P(val);
+        event_obj->event_code = Z_LVAL_P(val);
     }
     
     // Parse URIs
@@ -1256,11 +2031,19 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
     // Parse message body
     if ((val = zend_hash_str_find(ht, "body", 4)) != NULL && Z_TYPE_P(val) == IS_STRING) {
         event_obj->body = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
+        fprintf(stderr, "[PHP-DEBUG] obj=%p body hydrated: %.50s... (len=%zu)\n", event_obj, event_obj->body, Z_STRLEN_P(val));
+    } else {
+        fprintf(stderr, "[PHP-DEBUG] obj=%p body NOT found in array (val=%p, type=%d)\n", 
+                event_obj, val, val ? Z_TYPE_P(val) : -1);
     }
     
     // Parse content type
     if ((val = zend_hash_str_find(ht, "content_type", 12)) != NULL && Z_TYPE_P(val) == IS_STRING) {
         event_obj->content_type = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
+        fprintf(stderr, "[PHP-DEBUG] obj=%p content_type hydrated: %s\n", event_obj, event_obj->content_type);
+    } else {
+        fprintf(stderr, "[PHP-DEBUG] obj=%p content_type NOT found in array (val=%p, type=%d)\n",
+                event_obj, val, val ? Z_TYPE_P(val) : -1);
     }
     
     // Parse session information
@@ -1422,17 +2205,118 @@ static zval php_exosip_call_event_handler(zval *callback, zval *event_obj) {
     return retval;
 }
 
+/* Call error handler callback */
+static void php_exosip_call_error_handler(php_exosip_obj *obj, const char *error_msg) {
+    if (Z_ISNULL(obj->onError)) {
+        return;
+    }
+    
+    if (!zend_is_callable(&obj->onError, 0, NULL)) {
+        return;
+    }
+    
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    
+    if (zend_fcall_info_init(&obj->onError, 0, &fci, &fcc, NULL, NULL) == SUCCESS) {
+        zval params[1];
+        zval retval;
+        
+        ZVAL_STRING(&params[0], error_msg);
+        ZVAL_NULL(&retval);
+        
+        fci.retval = &retval;
+        fci.param_count = 1;
+        fci.params = params;
+        
+        zend_call_function(&fci, &fcc);
+        
+        zval_ptr_dtor(&params[0]);
+        if (!Z_ISUNDEF(retval)) {
+            zval_ptr_dtor(&retval);
+        }
+    }
+}
+
 /* Signal handler for graceful shutdown (multi-instance support) */
+static volatile sig_atomic_t g_signal_received = 0;
+
 static void php_exosip_signal_handler(int sig) {
+    // 防止重复处理
+    if (g_signal_received) {
+        return;
+    }
+    g_signal_received = 1;
+    
+    // 安全遍历实例列表（可能在遍历时被修改）
     php_exosip_instance_node *node = g_instance_list;
     while (node) {
-        if (node->instance) {
-            node->instance->is_running = 0;
-            if (node->instance->ctx) {
-                node->instance->ctx->running = 0;
+        // 保存 next 指针（防止 node 被释放）
+        php_exosip_instance_node *next_node = node->next;
+        
+        if (!node->instance) {
+            node = next_node;
+            continue;
+        }
+        
+        // 检查实例是否有效（防止野指针）
+        php_exosip_obj *inst = node->instance;
+        if (!inst) {
+            node = next_node;
+            continue;
+        }
+        
+        inst->is_running = 0;
+        
+        if (!inst->ctx) {
+            node = next_node;
+            continue;
+        }
+        
+        inst->ctx->running = 0;
+        
+        // 清理 Long Task 进程（仅 Worker 进程）
+        if (inst->ctx->is_worker && 
+            inst->ctx->long_task_count > 0 &&
+            inst->ctx->long_task_pids != NULL) {
+            
+            if (inst->ctx->server_info.debug) {
+                fprintf(stderr, "[Worker] Cleaning up %d Long Task(s) on signal %d\n", 
+                           inst->ctx->long_task_count, sig);
+            }
+            
+            for (int i = 0; i < inst->ctx->long_task_count; i++) {
+                pid_t pid = inst->ctx->long_task_pids[i];
+                if (pid > 0) {
+                    if (inst->ctx->server_info.debug) {
+                        fprintf(stderr, "[Worker] Sending SIGTERM to Long Task PID=%d\n", pid);
+                    }
+                    kill(pid, SIGTERM);
+                }
+            }
+            
+            // 等待所有 Long Task 子进程退出（避免僵尸进程）
+            int wait_count = 0;
+            while (wait_count < inst->ctx->long_task_count) {
+                int status;
+                pid_t pid = waitpid(-1, &status, WNOHANG);
+                if (pid > 0) {
+                    wait_count++;
+                    if (inst->ctx->server_info.debug) {
+                        fprintf(stderr, "[Worker] Long Task PID=%d exited\n", pid);
+                    }
+                } else {
+                    break;  // 没有更多子进程
+                }
+            }
+            
+            // 清空数组
+            for (int i = 0; i < inst->ctx->long_task_count; i++) {
+                inst->ctx->long_task_pids[i] = 0;
             }
         }
-        node = node->next;
+        
+        node = next_node;
     }
 }
 
@@ -1504,6 +2388,86 @@ PHP_METHOD(ExoSip, sendMessage) {
     RETURN_BOOL(result == 0);
 }
 
+/* ========== ExoSip::sendInvite(string $toUri, string $sdp, array $headers = []) ========== */
+PHP_METHOD(ExoSip, sendInvite) {
+    char *to_uri, *sdp;
+    size_t to_uri_len, sdp_len;
+    HashTable *headers = NULL;
+    
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STRING(to_uri, to_uri_len)
+        Z_PARAM_STRING(sdp, sdp_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_HT(headers)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    // 从 headers 数组中提取 Subject
+    char *subject = NULL;
+    if (headers) {
+        zval *subject_val = zend_hash_str_find(headers, "Subject", sizeof("Subject") - 1);
+        if (subject_val && Z_TYPE_P(subject_val) == IS_STRING) {
+            subject = Z_STRVAL_P(subject_val);
+        }
+    }
+    
+    // 调用底层实现
+    int call_id = sip_send_invite(obj->ctx, to_uri, sdp, subject);
+    
+    if (call_id < 0) {
+        RETURN_FALSE;
+    }
+    
+    RETURN_LONG(call_id);
+}
+
+/* ========== ExoSip::sendBye(int $callId, int $dialogId = -1) ========== */
+PHP_METHOD(ExoSip, sendBye) {
+    zend_long call_id, dialog_id = -1;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(call_id)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(dialog_id)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    // 调用底层实现
+    int result = sip_send_bye(obj->ctx, (int)call_id, (int)dialog_id);
+    
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::sendAck(int $dialogId) ========== */
+PHP_METHOD(ExoSip, sendAck) {
+    zend_long dialog_id;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(dialog_id)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    // 调用底层实现
+    int result = sip_send_ack(obj->ctx, (int)dialog_id);
+    
+    RETURN_BOOL(result == 0);
+}
+
 /* ========== ExoSip::sendResponse(int $tid, int $code, string $reason, array $headers) ========== */
 PHP_METHOD(ExoSip, sendResponse) {
     zend_long tid, code;
@@ -1541,6 +2505,95 @@ PHP_METHOD(ExoSip, sendResponse) {
 
     int result = exosip_send_response_wrapper(obj->ctx, (int)tid, (int)code, reason, 
                                               headers_str[0] ? headers_str : NULL);
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::subscribe(string $toUri, string $eventType, int $expires, string $xmlBody) ========== */
+PHP_METHOD(ExoSip, subscribe) {
+    char *to_uri, *event_type, *xml_body = NULL;
+    size_t to_uri_len, event_type_len, xml_body_len = 0;
+    zend_long expires = 3600;
+    
+    ZEND_PARSE_PARAMETERS_START(2, 4)
+        Z_PARAM_STRING(to_uri, to_uri_len)
+        Z_PARAM_STRING(event_type, event_type_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(expires)
+        Z_PARAM_STRING(xml_body, xml_body_len)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    int subscription_id = sip_send_subscribe(obj->ctx, to_uri, event_type, (int)expires, xml_body);
+    
+    if (subscription_id < 0) {
+        RETURN_FALSE;
+    }
+    
+    RETURN_LONG(subscription_id);
+}
+
+/* ========== ExoSip::refreshSubscribe(int $subscriptionId, int $expires) ========== */
+PHP_METHOD(ExoSip, refreshSubscribe) {
+    zend_long subscription_id, expires = 3600;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(subscription_id)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(expires)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    int result = sip_refresh_subscribe(obj->ctx, (int)subscription_id, (int)expires);
+    
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::cancelSubscribe(int $subscriptionId) ========== */
+PHP_METHOD(ExoSip, cancelSubscribe) {
+    zend_long subscription_id;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(subscription_id)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    int result = sip_cancel_subscribe(obj->ctx, (int)subscription_id);
+    
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::sendNotifyResponse(int $tid, int $code) ========== */
+PHP_METHOD(ExoSip, sendNotifyResponse) {
+    zend_long tid, code;
+    
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_LONG(tid)
+        Z_PARAM_LONG(code)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    int result = sip_send_notify_response(obj->ctx, (int)tid, (int)code);
+    
     RETURN_BOOL(result == 0);
 }
 
@@ -1709,6 +2762,534 @@ PHP_METHOD(ExoSip, getStats) {
     add_assoc_zval(return_value, "event_handlers", &handlers);
 }
 
+/* ========== ExoSip::parseSdp() - 原生 SDP 解析（静态方法） ========== */
+/**
+ * 使用 osip2 原生 API 解析 SDP 
+ * 生产级别实现，支持 eXosip2 5.1.2 (macOS) 和 5.3.0 (Linux)
+ * 
+ * @param string $sdp_body SDP 文本内容
+ * @return array|null 解析后的 SDP 数组，失败返回 null
+ * 
+ * 返回数组结构：
+ * [
+ *   'version' => '0',
+ *   'origin' => ['username' => ..., 'session_id' => ..., 'addr' => ...],
+ *   'session_name' => 'Play',
+ *   'connection' => ['nettype' => 'IN', 'addrtype' => 'IP4', 'addr' => '192.168.1.100'],
+ *   'medias' => [
+ *     ['media' => 'video', 'port' => '6000', 'proto' => 'RTP/AVP', 
+ *      'payloads' => ['96', '98'], 'attributes' => [...]],
+ *     ['media' => 'audio', 'port' => '6002', 'proto' => 'RTP/AVP', ...]
+ *   ]
+ * ]
+ */
+PHP_METHOD(ExoSip, parseSdp) {
+    char *sdp_str;
+    size_t sdp_len;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(sdp_str, sdp_len)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    // 参数验证
+    if (!sdp_str || sdp_len == 0) {
+        RETURN_NULL();
+    }
+    
+    // GB28181 扩展字段存储
+    char gb28181_y[128] = {0};  // y= SSRC
+    char gb28181_f[256] = {0};  // f= f参数
+    
+    // GB28181 兼容性处理：提取并移除非标准字段 (y=, f=)
+    // osip2 是严格的 RFC 4566 解析器，不支持私有扩展
+    // 
+    // 策略：逐行扫描，检测 y= 和 f= 行并跳过
+    char *cleaned_sdp = (char*)emalloc(sdp_len + 1);
+    const char *read_pos = sdp_str;
+    char *write_pos = cleaned_sdp;
+    
+    while (*read_pos) {
+        const char *line_start = read_pos;
+        
+        // 找到行尾
+        while (*read_pos && *read_pos != '\r' && *read_pos != '\n') {
+            read_pos++;
+        }
+        
+        size_t line_len = read_pos - line_start;
+        int skip_line = 0;
+        
+        // 检查是否是 GB28181 私有字段（至少2字符：x=）
+        if (line_len >= 2 && line_start[1] == '=') {
+            if (line_start[0] == 'y') {
+                // y=0100000001
+                skip_line = 1;
+                size_t value_len = line_len - 2;
+                if (value_len > 0 && value_len < sizeof(gb28181_y)) {
+                    memcpy(gb28181_y, line_start + 2, value_len);
+                    gb28181_y[value_len] = '\0';
+                }
+            } else if (line_start[0] == 'f') {
+                // f= 或 f=v/////a/1/2/3
+                skip_line = 1;
+                size_t value_len = line_len - 2;
+                if (value_len > 0 && value_len < sizeof(gb28181_f)) {
+                    memcpy(gb28181_f, line_start + 2, value_len);
+                    gb28181_f[value_len] = '\0';
+                }
+            }
+        }
+        
+        // 如果不跳过，复制整行到输出
+        if (!skip_line && line_len > 0) {
+            memcpy(write_pos, line_start, line_len);
+            write_pos += line_len;
+        }
+        
+        // 处理换行符（如果不跳过此行，也复制换行符）
+        if (*read_pos == '\r') {
+            if (!skip_line) {
+                *write_pos++ = '\r';
+            }
+            read_pos++;
+            if (*read_pos == '\n') {
+                if (!skip_line) {
+                    *write_pos++ = '\n';
+                }
+                read_pos++;
+            }
+        } else if (*read_pos == '\n') {
+            if (!skip_line) {
+                *write_pos++ = '\n';
+            }
+            read_pos++;
+        }
+    }
+    
+    *write_pos = '\0';
+    
+    // 使用 osip2 原生 SDP 解析器
+    sdp_message_t *sdp = NULL;
+    int ret = sdp_message_init(&sdp);
+    
+    if (ret != 0 || sdp == NULL) {
+        efree(cleaned_sdp);
+        php_error_docref(NULL, E_WARNING, "Failed to initialize SDP message structure");
+        RETURN_NULL();
+    }
+    
+    // 解析清理后的 SDP 字符串
+    ret = sdp_message_parse(sdp, cleaned_sdp);
+    efree(cleaned_sdp);
+    
+    if (ret != 0) {
+        sdp_message_free(sdp);
+        php_error_docref(NULL, E_WARNING, "Failed to parse SDP body (invalid format)");
+        RETURN_NULL();
+    }
+    
+    // 创建返回数组
+    array_init(return_value);
+    
+    // 1. 提取 v= (version)
+    char *version = sdp_message_v_version_get(sdp);
+    if (version) {
+        add_assoc_string(return_value, "version", version);
+    }
+    
+    // 2. 提取 o= (origin)
+    char *o_username = sdp_message_o_username_get(sdp);
+    char *o_sess_id = sdp_message_o_sess_id_get(sdp);
+    char *o_sess_version = sdp_message_o_sess_version_get(sdp);
+    char *o_nettype = sdp_message_o_nettype_get(sdp);
+    char *o_addrtype = sdp_message_o_addrtype_get(sdp);
+    char *o_addr = sdp_message_o_addr_get(sdp);
+    
+    if (o_username || o_sess_id || o_addr) {
+        zval origin;
+        array_init(&origin);
+        if (o_username) add_assoc_string(&origin, "username", o_username);
+        if (o_sess_id) add_assoc_string(&origin, "session_id", o_sess_id);
+        if (o_sess_version) add_assoc_string(&origin, "session_version", o_sess_version);
+        if (o_nettype) add_assoc_string(&origin, "nettype", o_nettype);
+        if (o_addrtype) add_assoc_string(&origin, "addrtype", o_addrtype);
+        if (o_addr) add_assoc_string(&origin, "addr", o_addr);
+        add_assoc_zval(return_value, "origin", &origin);
+    }
+    
+    // 3. 提取 s= (session name)
+    char *s_name = sdp_message_s_name_get(sdp);
+    if (s_name) {
+        add_assoc_string(return_value, "session_name", s_name);
+    }
+    
+    // 4. 提取 c= (connection) - 会话级别
+    sdp_connection_t *conn = sdp_message_connection_get(sdp, 0, 0);
+    if (conn && conn->c_addr) {
+        zval connection;
+        array_init(&connection);
+        if (conn->c_nettype) add_assoc_string(&connection, "nettype", conn->c_nettype);
+        if (conn->c_addrtype) add_assoc_string(&connection, "addrtype", conn->c_addrtype);
+        if (conn->c_addr) add_assoc_string(&connection, "addr", conn->c_addr);
+        add_assoc_zval(return_value, "connection", &connection);
+    }
+    
+    // 5. 提取 m= (medias) - 支持多个媒体流
+    zval medias;
+    array_init(&medias);
+    
+    int media_pos = 0;
+    sdp_media_t *media = NULL;
+    
+    while ((media = (sdp_media_t*)osip_list_get(&sdp->m_medias, media_pos)) != NULL) {
+        zval media_arr;
+        array_init(&media_arr);
+        
+        // 媒体类型 (audio/video/application)
+        if (media->m_media) {
+            add_assoc_string(&media_arr, "media", media->m_media);
+        }
+        
+        // 端口号
+        if (media->m_port) {
+            add_assoc_string(&media_arr, "port", media->m_port);
+        }
+        
+        // 传输协议 (RTP/AVP, TCP/RTP/AVP, UDP/TLS/RTP/SAVP等)
+        if (media->m_proto) {
+            add_assoc_string(&media_arr, "proto", media->m_proto);
+        }
+        
+        // Payload 类型列表 (96, 98, 97, 0, 8 等)
+        zval payloads;
+        array_init(&payloads);
+        int payload_pos = 0;
+        char *payload = NULL;
+        while ((payload = (char*)osip_list_get(&media->m_payloads, payload_pos)) != NULL) {
+            add_next_index_string(&payloads, payload);
+            payload_pos++;
+        }
+        add_assoc_zval(&media_arr, "payloads", &payloads);
+        
+        // 媒体级别的连接信息
+        sdp_connection_t *media_conn = (sdp_connection_t*)osip_list_get(&media->c_connections, 0);
+        if (media_conn && media_conn->c_addr) {
+            zval m_conn;
+            array_init(&m_conn);
+            if (media_conn->c_nettype) add_assoc_string(&m_conn, "nettype", media_conn->c_nettype);
+            if (media_conn->c_addrtype) add_assoc_string(&m_conn, "addrtype", media_conn->c_addrtype);
+            if (media_conn->c_addr) add_assoc_string(&m_conn, "addr", media_conn->c_addr);
+            add_assoc_zval(&media_arr, "connection", &m_conn);
+        }
+        
+        // a= 属性列表 (rtpmap, fmtp, sendonly, recvonly, setup等)
+        zval attributes;
+        array_init(&attributes);
+        int attr_pos = 0;
+        sdp_attribute_t *attr = NULL;
+        while ((attr = (sdp_attribute_t*)osip_list_get(&media->a_attributes, attr_pos)) != NULL) {
+            if (attr->a_att_field) {
+                if (attr->a_att_value) {
+                    // 有值的属性: a=rtpmap:96 PS/90000
+                    add_assoc_string(&attributes, attr->a_att_field, attr->a_att_value);
+                } else {
+                    // 无值的属性: a=sendonly
+                    add_assoc_null(&attributes, attr->a_att_field);
+                }
+            }
+            attr_pos++;
+        }
+        add_assoc_zval(&media_arr, "attributes", &attributes);
+        
+        add_next_index_zval(&medias, &media_arr);
+        media_pos++;
+    }
+    
+    add_assoc_zval(return_value, "medias", &medias);
+    
+    // 6. 添加 GB28181 扩展字段 (如果存在)
+    if (strlen(gb28181_y) > 0 || strlen(gb28181_f) > 0) {
+        zval gb28181;
+        array_init(&gb28181);
+        
+        if (strlen(gb28181_y) > 0) {
+            add_assoc_string(&gb28181, "ssrc", gb28181_y);  // y= SSRC字段
+        }
+        if (strlen(gb28181_f) > 0) {
+            add_assoc_string(&gb28181, "f", gb28181_f);     // f= f参数
+        }
+        
+        add_assoc_zval(return_value, "gb28181", &gb28181);
+    }
+    
+    // 清理
+    sdp_message_free(sdp);
+}
+
+PHP_METHOD(ExoSip, addTask) {
+    zval *data;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY(data)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    
+    if (!obj->ctx || !obj->ctx->is_worker) {
+        php_error_docref(NULL, E_WARNING, "addTask can only be called in Worker process");
+        RETURN_FALSE;
+    }
+    
+    smart_str buf = {0};
+    php_serialize_data_t var_hash;
+    PHP_VAR_SERIALIZE_INIT(var_hash);
+    php_var_serialize(&buf, data, &var_hash);
+    PHP_VAR_SERIALIZE_DESTROY(var_hash);
+    
+    if (!buf.s) {
+        RETURN_FALSE;
+    }
+    
+    unsigned long task_id = sip_add_task(obj->ctx, ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+    smart_str_free(&buf);
+    
+    if (task_id == 0) {
+        RETURN_FALSE;
+    }
+    
+    RETURN_LONG(task_id);
+}
+
+/* ========== ExoSip::sendToWorker($data) ========== */
+PHP_METHOD(ExoSip, sendToWorker) {
+    zval *data;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "ExoSip not initialized");
+        RETURN_FALSE;
+    }
+    
+    // 允许 Task 和 Long Task 进程调用 sendToWorker
+    if (!obj->ctx->is_task && !obj->ctx->is_long_task) {
+        php_error_docref(NULL, E_WARNING, "sendToWorker can only be called from Task or Long Task process");
+        RETURN_FALSE;
+    }
+    
+    // Serialize data
+    smart_str buf = {0};
+    php_serialize_data_t var_hash;
+    PHP_VAR_SERIALIZE_INIT(var_hash);
+    php_var_serialize(&buf, data, &var_hash);
+    PHP_VAR_SERIALIZE_DESTROY(var_hash);
+    smart_str_0(&buf);
+    
+    if (!buf.s) {
+        php_error_docref(NULL, E_WARNING, "Failed to serialize data");
+        RETURN_FALSE;
+    }
+    
+    int result = sip_task_send_to_worker(obj->ctx, ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+    smart_str_free(&buf);
+    
+    if (result < 0) {
+        RETURN_FALSE;
+    }
+    
+    RETURN_TRUE;
+}
+
+/* ========== ExoSip::startLongTask(callable $callback) ========== */
+/**
+ * 启动一个长期运行的Task进程
+ * 将回调发送给预分配的 Long Task 进程（由 Master fork）
+ * 只能在Worker进程的onWorkerStart回调中调用
+ * 
+ * @param callable $callback 回调函数,在Long Task进程中执行
+ * @return bool 成功返回true,失败返回false
+ */
+PHP_METHOD(ExoSip, startLongTask) {
+    zval *callback;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(callback)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "ExoSip not initialized");
+        RETURN_FALSE;
+    }
+    
+    if (!obj->ctx->is_worker) {
+        php_error_docref(NULL, E_WARNING, "startLongTask can only be called from Worker process");
+        RETURN_FALSE;
+    }
+    
+    if (obj->ctx->server_info.debug) {
+        fprintf(stderr, "[DEBUG] startLongTask: long_task_count=%d, long_task_pids=%p, long_task_sockfds=%p\n",
+            obj->ctx->long_task_count, 
+            (void*)obj->ctx->long_task_pids,
+            (void*)obj->ctx->long_task_sockfds);
+    }
+    
+    if (obj->ctx->long_task_count <= 0) {
+        php_error_docref(NULL, E_WARNING, "No Long Task workers configured. Set 'long_task_worker_num' in init()");
+        RETURN_FALSE;
+    }
+    
+    if (!zend_is_callable(callback, 0, NULL)) {
+        php_error_docref(NULL, E_WARNING, "Parameter must be a valid callback");
+        RETURN_FALSE;
+    }
+    
+    // 直接在此处 fork Long Task 子进程（利用 fork 的内存副本特性）
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == -1) {
+        php_error_docref(NULL, E_WARNING, "Failed to create socketpair: %s", strerror(errno));
+        RETURN_FALSE;
+    }
+    
+    pid_t pid = fork();
+    
+    if (pid < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        php_error_docref(NULL, E_WARNING, "Failed to fork Long Task: %s", strerror(errno));
+        RETURN_FALSE;
+    }
+    
+    if (pid == 0) {
+        // Long Task 子进程
+        close(sv[0]);
+        
+        // 设置 Long Task 标志和 Worker 通信 socket
+        obj->ctx->is_long_task = 1;
+        obj->ctx->is_worker = 0;
+        obj->ctx->is_task = 0;
+        obj->ctx->worker_sockfd = sv[1];  // 保存通向 Worker 的 socket
+        
+        // 关闭所有继承的 fd（避免泄漏）
+        if (obj->ctx->task_sockfds) {
+            for (int j = 0; j < obj->ctx->task_count; j++) {
+                if (obj->ctx->task_sockfds[j] >= 0) {
+                    close(obj->ctx->task_sockfds[j]);
+                }
+            }
+        }
+        
+        if (obj->ctx->long_task_sockfds) {
+            for (int j = 0; j < obj->ctx->long_task_count; j++) {
+                if (obj->ctx->long_task_sockfds[j] >= 0) {
+                    close(obj->ctx->long_task_sockfds[j]);
+                }
+            }
+        }
+        
+        // 不调用 eXosip_quit()，因为：
+        // 1. Long Task 在 Worker 初始化 eXosip 之后 fork，继承了损坏的线程状态
+        // 2. eXosip_quit() 会尝试清理不存在的线程，导致错误
+        // 3. Long Task 不使用 SIP 功能，不需要 eXosip
+        // 4. Long Task 是永久运行的进程，不依赖进程退出清理
+        if (obj->ctx->ctx) {
+            obj->ctx->ctx = NULL;  // 只需置空指针，防止意外使用
+        }
+        
+        if (obj->ctx->server_info.debug) {
+            fprintf(stderr, "[LongTask] Started PID=%d, can use sendToWorker()\n", getpid());
+        }
+        
+        // 设置信号处理器（优雅退出）
+        signal(SIGTERM, SIG_DFL);  // 默认处理（允许被 kill）
+        signal(SIGINT, SIG_DFL);
+        
+        // 直接调用回调（fork 后 zval 是有效副本）
+        zval retval;
+        zval args[0];
+        
+        // 使用 zend_try 捕获异常
+        zend_try {
+            if (call_user_function(NULL, NULL, callback, &retval, 0, args) == SUCCESS) {
+                fprintf(stderr, "[LongTask] Callback completed normally\n");
+            } else {
+                fprintf(stderr, "[LongTask] Callback execution failed\n");
+            }
+            zval_ptr_dtor(&retval);
+        } zend_catch {
+            fprintf(stderr, "[LongTask] Callback terminated by signal or exception\n");
+        } zend_end_try();
+        
+        close(sv[1]);
+        fprintf(stderr, "[LongTask] Exiting (PID=%d)\n", getpid());
+        _exit(0);
+    }
+    
+    // Worker 父进程
+    close(sv[1]);
+    
+    // 设置 sv[0] 为非阻塞模式（重要！）
+    int flags = fcntl(sv[0], F_GETFL, 0);
+    if (flags != -1) {
+        fcntl(sv[0], F_SETFL, flags | O_NONBLOCK);
+    }
+    
+    // 找到空闲槽位并记录 PID
+    int slot_id = -1;
+    for (int i = 0; i < obj->ctx->long_task_count; i++) {
+        if (obj->ctx->long_task_pids[i] == 0) {
+            obj->ctx->long_task_pids[i] = pid;
+            obj->ctx->long_task_sockfds[i] = sv[0];
+            slot_id = i;
+            break;
+        }
+    }
+    
+    if (slot_id == -1) {
+        // 没有空槽位，关闭 socket
+        close(sv[0]);
+        php_error_docref(NULL, E_WARNING, "No free slot to track Long Task PID=%d", pid);
+    }
+    
+    if (obj->ctx->server_info.debug) {
+        fprintf(stderr, "[Worker] Started Long Task PID=%d (slot=%d)\n", pid, slot_id);
+    }
+    
+    RETURN_TRUE;
+}
+
+/* ========== ExoSip::getProcessStatus() ========== */
+PHP_METHOD(ExoSip, getProcessStatus) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    
+    if (!obj->ctx) {
+        RETURN_FALSE;
+    }
+    
+    sip_get_process_status(obj->ctx, return_value);
+}
+
+/* ========== ExoSip::getRunStatus() 静态方法 ========== */
+PHP_METHOD(ExoSip, getRunStatus) {
+    char *pid_file;
+    size_t pid_file_len;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(pid_file, pid_file_len)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    if (sip_read_process_status_from_pid(pid_file, return_value) < 0) {
+        RETURN_FALSE;
+    }
+}
+
 /* 全局函数已移除 - 统一使用 ExoSip 类的 OOP API */
 
 /* ===== ExoSip Class methods ===== */
@@ -1729,12 +3310,31 @@ const zend_function_entry exosip_methods[] = {
     
     /* Message handling */
     PHP_ME(ExoSip, sendMessage, arginfo_exosip_sendmessage, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendInvite, arginfo_exosip_sendinvite, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendBye, arginfo_exosip_sendbye, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendAck, arginfo_exosip_sendack, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendResponse, arginfo_exosip_sendresponse, ZEND_ACC_PUBLIC)
+    
+    /* SUBSCRIBE/NOTIFY support */
+    PHP_ME(ExoSip, subscribe, arginfo_exosip_subscribe, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, refreshSubscribe, arginfo_exosip_refreshsubscribe, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, cancelSubscribe, arginfo_exosip_cancelsubscribe, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendNotifyResponse, arginfo_exosip_sendnotifyresponse, ZEND_ACC_PUBLIC)
     
     /* Configuration and statistics */
     PHP_ME(ExoSip, setConfig, arginfo_exosip_setconfig, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getConfig, arginfo_exosip_getconfig, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getStats, arginfo_exosip_getstats, ZEND_ACC_PUBLIC)
+    
+    /* SDP Parsing */
+    PHP_ME(ExoSip, parseSdp, arginfo_exosip_parsesdp, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+    
+    /* Master-Worker-Task */
+    PHP_ME(ExoSip, addTask, arginfo_exosip_addtask, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendToWorker, arginfo_exosip_sendtoworker, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, startLongTask, arginfo_exosip_startlongtask, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, getProcessStatus, arginfo_exosip_getprocessstatus, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, getRunStatus, arginfo_exosip_getrunstatus, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     
     PHP_FE_END
 };
