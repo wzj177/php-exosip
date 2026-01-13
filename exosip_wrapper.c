@@ -1750,7 +1750,7 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
 
         // 创建事件对象
         zval event_obj;
-        exosip_create_event_object_array(evt, conn, session, &event_obj);
+        exosip_create_event_object_array(evt, conn, session, &event_obj, debug);
         
         // 添加到事件数组
         add_next_index_zval(events_array, &event_obj);
@@ -1907,7 +1907,7 @@ int exosip_send_message_with_content_type(SipContext *ctx, const char *to, const
     if (debug) fprintf(stderr, "[DEBUG] ✓ MESSAGE sent successfully, transaction ID: %d\n", send_ret);
     
     eXosip_unlock(ctx->ctx);
-    return 0;
+    return send_ret;  // 返回 transaction_id 用于请求-响应关联
 }
 
 /**
@@ -1988,7 +1988,7 @@ int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char 
  * @param session 会话信息
  * @param event_array PHP数组
  */
-void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array) {
+void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array, int debug) {
     array_init(event_array);
     
     // 基本事件信息
@@ -2066,22 +2066,28 @@ void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn,
     // 优先从响应中提取body（对于200 OK等响应事件）
     // 如果没有响应，则从请求中提取（对于INVITE等请求事件）
     osip_message_t *body_msg = evt->response ? evt->response : evt->request;
-    fprintf(stderr, "[C-DEBUG] body_msg source: %s (evt->type=%d)\n", 
-            evt->response ? "response" : (evt->request ? "request" : "NULL"), evt->type);
+    if (debug) {
+        fprintf(stderr, "[C-DEBUG] body_msg source: %s (evt->type=%d)\n", 
+                evt->response ? "response" : (evt->request ? "request" : "NULL"), evt->type);
+    }
     
     if (body_msg) {
         // 使用标准osip API获取body
         osip_body_t *osip_body = NULL;
         int ret = osip_message_get_body(body_msg, 0, &osip_body);
-        fprintf(stderr, "[C-DEBUG] osip_message_get_body returned: %d\n", ret);
+        if (debug) fprintf(stderr, "[C-DEBUG] osip_message_get_body returned: %d\n", ret);
         
         if (ret == 0 && osip_body && osip_body->body) {
             body = osip_body->body;
-            fprintf(stderr, "[C-DEBUG] Body extracted: %.50s... (length=%zu)\n", 
-                    body, strlen(body));
+            if (debug) {
+                fprintf(stderr, "[C-DEBUG] Body extracted (length=%zu):\n%s\n", 
+                        strlen(body), body);
+            }
         } else {
-            fprintf(stderr, "[C-DEBUG] No body found (ret=%d, osip_body=%p)\n", 
-                    ret, (void*)osip_body);
+            if (debug) {
+                fprintf(stderr, "[C-DEBUG] No body found (ret=%d, osip_body=%p)\n", 
+                        ret, (void*)osip_body);
+            }
         }
         
         // 获取Content-Type
@@ -2090,9 +2096,9 @@ void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn,
             static char ct_buffer[256];
             snprintf(ct_buffer, sizeof(ct_buffer), "%s/%s", ct->type, ct->subtype);
             content_type = ct_buffer;
-            fprintf(stderr, "[C-DEBUG] Content-Type extracted: %s\n", content_type);
+            if (debug) fprintf(stderr, "[C-DEBUG] Content-Type: %s\n", content_type);
         } else {
-            fprintf(stderr, "[C-DEBUG] No Content-Type found (ct=%p)\n", (void*)ct);
+            if (debug) fprintf(stderr, "[C-DEBUG] No Content-Type found\n");
         }
     }
     

@@ -498,8 +498,6 @@ PHP_METHOD(SipEvent, getBody) {
 
 PHP_METHOD(SipEvent, getContentType) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
-    fprintf(stderr, "[PHP-DEBUG] getContentType called: obj=%p, content_type=%p (%s)\n", 
-            obj, obj->content_type, obj->content_type ? obj->content_type : "NULL");
     if (obj->content_type) {
         RETURN_STRING(obj->content_type);
     }
@@ -861,7 +859,7 @@ typedef struct _php_exosip_obj {
 } php_exosip_obj;
 
 /* Forward declarations for universal SIP event processing */
-static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event_data);
+static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event_data, int debug);
 static const char* php_exosip_get_event_type_name(int event_type, osip_message_t *request);
 static zval* php_exosip_get_event_callback(php_exosip_obj *obj, const char *event_type);
 static zval php_exosip_call_event_handler(zval *callback, zval *event_obj);
@@ -1655,7 +1653,7 @@ PHP_METHOD(ExoSip, run) {
                         object_init_ex(&sip_event_obj, sip_event_ce);
                         php_sip_event_obj *event_obj = php_sip_event_from_obj(Z_OBJ(sip_event_obj));
                         
-                        if (!php_exosip_parse_event_data(event_obj, event_data)) {
+                        if (!php_exosip_parse_event_data(event_obj, event_data, obj->ctx->server_info.debug)) {
                             zval_ptr_dtor(&sip_event_obj);
                             continue;
                         }
@@ -1676,6 +1674,35 @@ PHP_METHOD(ExoSip, run) {
                         zval *callback = php_exosip_get_event_callback(obj, event_type);
                         
                         if (callback) {
+                            // 特殊处理 "error" 事件类型：传递字符串而不是 SipEvent
+                            // 这是为了与 php_exosip_call_error_handler 保持一致
+                            if (strcmp(event_type, "error") == 0) {
+                                // 从事件中提取错误信息
+                                char error_msg_buf[512];
+                                const char *error_msg = "SIP Error";
+                                
+                                // 尝试从响应中获取状态码和原因短语
+                                zval *status_code_val = zend_hash_str_find(Z_ARRVAL_P(event_data), "status_code", 11);
+                                zval *reason_val = zend_hash_str_find(Z_ARRVAL_P(event_data), "reason_phrase", 13);
+                                
+                                if (status_code_val && Z_TYPE_P(status_code_val) == IS_LONG) {
+                                    if (reason_val && Z_TYPE_P(reason_val) == IS_STRING) {
+                                        snprintf(error_msg_buf, sizeof(error_msg_buf), 
+                                                 "SIP Error %ld: %s", Z_LVAL_P(status_code_val), Z_STRVAL_P(reason_val));
+                                    } else {
+                                        snprintf(error_msg_buf, sizeof(error_msg_buf), 
+                                                 "SIP Error %ld", Z_LVAL_P(status_code_val));
+                                    }
+                                    error_msg = error_msg_buf;
+                                }
+                                
+                                // 调用错误处理器，传递字符串
+                                php_exosip_call_error_handler(obj, error_msg);
+                                
+                                zval_ptr_dtor(&sip_event_obj);
+                                continue;  // 跳过后续处理
+                            }
+                            
                             Z_TRY_ADDREF(sip_event_obj);
                             
                             zend_try {
@@ -1862,7 +1889,7 @@ PHP_METHOD(ExoSip, run) {
                 php_sip_event_obj *event_obj = php_sip_event_from_obj(Z_OBJ(sip_event_obj));
                 
                 // 解析事件数据
-                if (!php_exosip_parse_event_data(event_obj, event_data)) {
+                if (!php_exosip_parse_event_data(event_obj, event_data, obj->ctx->server_info.debug)) {
                     zval_ptr_dtor(&sip_event_obj);
                     continue;
                 }
@@ -1887,6 +1914,35 @@ PHP_METHOD(ExoSip, run) {
                 zval *callback = php_exosip_get_event_callback(obj, event_type);
                 
                 if (callback) {
+                    // 特殊处理 "error" 事件类型：传递字符串而不是 SipEvent
+                    // 这是为了与 php_exosip_call_error_handler 保持一致
+                    if (strcmp(event_type, "error") == 0) {
+                        // 从事件中提取错误信息
+                        char error_msg_buf[512];
+                        const char *error_msg = "SIP Error";
+                        
+                        // 尝试从响应中获取状态码和原因短语
+                        zval *status_code_val = zend_hash_str_find(Z_ARRVAL_P(event_data), "status_code", 11);
+                        zval *reason_val = zend_hash_str_find(Z_ARRVAL_P(event_data), "reason_phrase", 13);
+                        
+                        if (status_code_val && Z_TYPE_P(status_code_val) == IS_LONG) {
+                            if (reason_val && Z_TYPE_P(reason_val) == IS_STRING) {
+                                snprintf(error_msg_buf, sizeof(error_msg_buf), 
+                                         "SIP Error %ld: %s", Z_LVAL_P(status_code_val), Z_STRVAL_P(reason_val));
+                            } else {
+                                snprintf(error_msg_buf, sizeof(error_msg_buf), 
+                                         "SIP Error %ld", Z_LVAL_P(status_code_val));
+                            }
+                            error_msg = error_msg_buf;
+                        }
+                        
+                        // 调用错误处理器，传递字符串
+                        php_exosip_call_error_handler(obj, error_msg);
+                        
+                        zval_ptr_dtor(&sip_event_obj);
+                        continue;  // 跳过后续处理
+                    }
+                    
                     // 执行事件回调
                     // 注意：回调函数会接收对象的引用，需要增加引用计数
                     Z_TRY_ADDREF(sip_event_obj);
@@ -1967,7 +2023,7 @@ PHP_METHOD(ExoSip, run) {
 /* ========== Helper Functions for Event Processing ========== */
 
 /* Parse event data into SipEvent object */
-static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event_data) {
+static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event_data, int debug) {
     if (Z_TYPE_P(event_data) != IS_ARRAY) {
         return 0;
     }
@@ -2031,19 +2087,17 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
     // Parse message body
     if ((val = zend_hash_str_find(ht, "body", 4)) != NULL && Z_TYPE_P(val) == IS_STRING) {
         event_obj->body = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
-        fprintf(stderr, "[PHP-DEBUG] obj=%p body hydrated: %.50s... (len=%zu)\n", event_obj, event_obj->body, Z_STRLEN_P(val));
+        if (debug) fprintf(stderr, "[PHP-DEBUG] body hydrated: %s\n", event_obj->body);
     } else {
-        fprintf(stderr, "[PHP-DEBUG] obj=%p body NOT found in array (val=%p, type=%d)\n", 
-                event_obj, val, val ? Z_TYPE_P(val) : -1);
+        if (debug) fprintf(stderr, "[PHP-DEBUG] body NOT found in array (val=%p, type=%d)\n", val, val ? Z_TYPE_P(val) : -1);
     }
     
     // Parse content type
     if ((val = zend_hash_str_find(ht, "content_type", 12)) != NULL && Z_TYPE_P(val) == IS_STRING) {
         event_obj->content_type = estrndup(Z_STRVAL_P(val), Z_STRLEN_P(val));
-        fprintf(stderr, "[PHP-DEBUG] obj=%p content_type hydrated: %s\n", event_obj, event_obj->content_type);
+        if (debug) fprintf(stderr, "[PHP-DEBUG] content_type hydrated: %s\n", event_obj->content_type);
     } else {
-        fprintf(stderr, "[PHP-DEBUG] obj=%p content_type NOT found in array (val=%p, type=%d)\n",
-                event_obj, val, val ? Z_TYPE_P(val) : -1);
+        if (debug) fprintf(stderr, "[PHP-DEBUG] content_type NOT found in array (val=%p, type=%d)\n", val, val ? Z_TYPE_P(val) : -1);
     }
     
     // Parse session information
@@ -2385,7 +2439,13 @@ PHP_METHOD(ExoSip, sendMessage) {
     }
 
     int result = exosip_send_message_with_content_type(obj->ctx, to, message, content_type);
-    RETURN_BOOL(result == 0);
+    
+    // result >= 0: transaction_id (成功)
+    // result < 0: 失败
+    if (result < 0) {
+        RETURN_FALSE;
+    }
+    RETURN_LONG(result);  // 返回 transaction_id
 }
 
 /* ========== ExoSip::sendInvite(string $toUri, string $sdp, array $headers = []) ========== */

@@ -559,7 +559,7 @@ int exosip_send_message_with_content_type(SipContext *ctx, const char *to, const
 int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *headers);
 zval* exosip_create_event_object(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session);
 zval* exosip_create_session_object(SessionInfo *session);
-void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array);
+void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array, int debug);
 void exosip_create_session_object_array(SessionInfo *session, zval *session_array);
 
 // ============ 客户端API ============

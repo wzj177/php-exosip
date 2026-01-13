@@ -41,6 +41,13 @@ TCP 传输模式支持文档
 - GB28181Handler TCP 集成
 - 完整测试示例
 
+### [SIP_CALL_CENTER_TECH_SOLUTION.md](SIP_CALL_CENTER_TECH_SOLUTION.md)
+SIP 客服平台技术方案（实现级）
+- 架构选型（Proxy/SBC + PBX/B2BUA）
+- 转接/三方/排队/录音核心流程
+- WebRTC 接入与媒体锚定策略
+- 部署与可观测性要点
+
 ### [TASK_SERVER_OBJECT_SAFETY.md](TASK_SERVER_OBJECT_SAFETY.md) ⭐️
 Task 进程中 $server 对象安全性分析
 - fork() 内存模型详解

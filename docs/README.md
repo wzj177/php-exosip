@@ -83,6 +83,8 @@ docs/
 | [GB28181_HANDLER_ZLM_USAGE.md](03-功能实现/GB28181_HANDLER_ZLM_USAGE.md) | GB28181Handler 和 ZLM 对接 |
 | [GB28181_ZLM_INTEGRATION.md](03-功能实现/GB28181_ZLM_INTEGRATION.md) | ZLMediaKit 完整集成方案 |
 | [TCP_MODE_SUPPORT.md](03-功能实现/TCP_MODE_SUPPORT.md) | TCP 主动/被动模式支持 |
+| [SIP_CALL_CENTER_TECH_SOLUTION.md](03-功能实现/SIP_CALL_CENTER_TECH_SOLUTION.md) | SIP 客服平台技术方案（转接/媒体/WebRTC/前端对接/部署） |
+| [GB28181_CRUISE_SUPPORT.md](03-功能实现/GB28181_CRUISE_SUPPORT.md) | 巡航功能支持（基于预置位的巡航组配置与控制） |
 
 ### 客户端和回调
 | 文档 | 说明 |
