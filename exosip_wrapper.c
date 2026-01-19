@@ -899,15 +899,16 @@ int sip_send_invite(SipContext *ctx, const char *to_uri, const char *sdp, const 
     eXosip_lock(ctx->ctx);
     
     // 构建 INVITE 请求
-    int call_id = eXosip_call_build_initial_invite(ctx->ctx, &invite, to_uri, from_uri, NULL, NULL);
+    // 注意: eXosip_call_build_initial_invite 返回状态码 (0=成功), 不是 call_id!
+    int build_result = eXosip_call_build_initial_invite(ctx->ctx, &invite, to_uri, from_uri, NULL, NULL);
     
-    if (call_id < 0 || !invite) {
-        if (debug) fprintf(stderr, "[ERROR] Failed to build INVITE: call_id=%d\n", call_id);
+    if (build_result < 0 || !invite) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build INVITE: result=%d\n", build_result);
         eXosip_unlock(ctx->ctx);
         return -1;
     }
     
-    if (debug) fprintf(stderr, "[DEBUG] INVITE message built: call_id=%d\n", call_id);
+    if (debug) fprintf(stderr, "[DEBUG] INVITE message built successfully\n");
     
     // 添加 SDP body
     if (sdp && strlen(sdp) > 0) {
@@ -935,18 +936,21 @@ int sip_send_invite(SipContext *ctx, const char *to_uri, const char *sdp, const 
     }
     
     // 发送 INVITE
-    int ret = eXosip_call_send_initial_invite(ctx->ctx, invite);
+    // 注意: eXosip_call_send_initial_invite 返回的是 call_id (>0 成功), 不是 transaction_id
+    int actual_call_id = eXosip_call_send_initial_invite(ctx->ctx, invite);
     
     eXosip_unlock(ctx->ctx);
     
-    if (ret < 0) {
-        if (debug) fprintf(stderr, "[ERROR] Failed to send INVITE: eXosip_call_send_initial_invite returned %d\n", ret);
+    if (actual_call_id < 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send INVITE: eXosip_call_send_initial_invite returned %d\n", actual_call_id);
         return -1;
     }
     
-    if (debug) fprintf(stderr, "[DEBUG] ✓ INVITE sent successfully: call_id=%d, transaction_id=%d\n", call_id, ret);
+    if (debug) fprintf(stderr, "[DEBUG] ✓ INVITE sent successfully: call_id=%d\n", actual_call_id);
     
-    return call_id;
+    // 返回 actual_call_id (由 eXosip_call_send_initial_invite 返回)
+    // 注意: eXosip_call_build_initial_invite 返回的是状态码 (0=成功), 不是 call_id!
+    return actual_call_id;
 }
 
 /**
