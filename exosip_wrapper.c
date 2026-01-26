@@ -758,6 +758,80 @@ int sip_send_message(SipContext *ctx, const char *target_uri, const char *conten
     return exosip_send_message_with_content_type(ctx, target_uri, body, content_type);
 }
 
+/**
+ * 发送 INFO 请求 (用于回放控制等会话内信令)
+ * 
+ * GB28181 回放控制使用 SIP INFO 消息在已建立的 INVITE 会话内发送控制命令
+ * 这与使用 MESSAGE 方法发送的带外消息不同,INFO 必须在活动会话内发送
+ * 
+ * @param ctx SIP 上下文
+ * @param dialog_id 对话 ID (由 sendInvite 返回的 call_id 建立的会话)
+ * @param body 消息体 (MANSRTSP 命令,如 "PAUSE RTSP/1.0\r\nCSeq: 1\r\n...")
+ * @param content_type 内容类型 (通常为 "Application/MANSRTSP")
+ * @return 0 成功, -1 失败
+ */
+int sip_send_info(SipContext *ctx, int dialog_id, const char *body, const char *content_type) {
+    if (!ctx || dialog_id < 0) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    if (debug) {
+        fprintf(stderr, "[DEBUG] ========== INFO REQUEST ==========\n");
+        fprintf(stderr, "[DEBUG] Dialog ID: %d\n", dialog_id);
+        fprintf(stderr, "[DEBUG] Content-Type: %s\n", content_type ? content_type : "Application/MANSRTSP");
+        if (body) {
+            fprintf(stderr, "[DEBUG] Body:\n%s\n", body);
+        }
+        fprintf(stderr, "[DEBUG] ===================================\n");
+    }
+    
+    osip_message_t *info = NULL;
+    eXosip_lock(ctx->ctx);
+    
+    // 在已建立的对话中构建 INFO 请求
+    int ret = eXosip_call_build_info(ctx->ctx, dialog_id, &info);
+    
+    if (ret < 0 || !info) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build INFO: ret=%d, dialog_id=%d\n", ret, dialog_id);
+        eXosip_unlock(ctx->ctx);
+        return -1;
+    }
+    
+    // 设置消息体和 Content-Type
+    const char *ct = content_type ? content_type : "Application/MANSRTSP";
+    if (body && strlen(body) > 0) {
+        osip_message_set_body(info, body, strlen(body));
+        osip_message_set_content_type(info, ct);
+    }
+    
+    // 打印完整的 INFO 消息（调试用）
+    if (debug) {
+        char *msg_str = NULL;
+        size_t msg_len = 0;
+        osip_message_to_str(info, &msg_str, &msg_len);
+        if (msg_str) {
+            fprintf(stderr, "[DEBUG] Complete SIP INFO message:\n%s\n", msg_str);
+            osip_free(msg_str);
+        }
+    }
+    
+    // 发送 INFO 请求
+    ret = eXosip_call_send_request(ctx->ctx, dialog_id, info);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret < 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send INFO: ret=%d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ INFO sent successfully\n");
+    
+    return 0;
+}
+
 // ==================== GB28181专用功能 ====================
 
 int sip_send_catalog_query(SipContext *ctx, const char *device_id) {

@@ -61,6 +61,12 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendack, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, dialogId, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendinfo, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, dialogId, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, body, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, contentType, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendresponse, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, tid, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, code, IS_LONG, 0)
@@ -2528,6 +2534,44 @@ PHP_METHOD(ExoSip, sendAck) {
     RETURN_BOOL(result == 0);
 }
 
+/* ========== ExoSip::sendInfo(int $dialogId, string $body, ?string $contentType = null) ========== */
+/**
+ * 发送 INFO 请求 (用于回放控制等会话内信令)
+ * 
+ * GB28181 回放控制使用 SIP INFO 消息在已建立的 INVITE 会话内发送控制命令
+ * 这与使用 MESSAGE 方法发送的带外消息不同,INFO 必须在活动会话内发送
+ * 
+ * @param int $dialogId 对话 ID (由 sendInvite 建立的会话返回)
+ * @param string $body 消息体 (MANSRTSP 命令)
+ * @param string|null $contentType 内容类型 (默认 "Application/MANSRTSP")
+ * @return bool 成功返回 true, 失败返回 false
+ */
+PHP_METHOD(ExoSip, sendInfo) {
+    zend_long dialog_id;
+    char *body;
+    size_t body_len;
+    char *content_type = NULL;
+    size_t content_type_len = 0;
+    
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_LONG(dialog_id)
+        Z_PARAM_STRING(body, body_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STRING(content_type, content_type_len)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    // 调用底层实现
+    int result = sip_send_info(obj->ctx, (int)dialog_id, body, content_type);
+    
+    RETURN_BOOL(result == 0);
+}
+
 /* ========== ExoSip::sendResponse(int $tid, int $code, string $reason, array $headers) ========== */
 PHP_METHOD(ExoSip, sendResponse) {
     zend_long tid, code;
@@ -3373,6 +3417,7 @@ const zend_function_entry exosip_methods[] = {
     PHP_ME(ExoSip, sendInvite, arginfo_exosip_sendinvite, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendBye, arginfo_exosip_sendbye, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendAck, arginfo_exosip_sendack, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendInfo, arginfo_exosip_sendinfo, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendResponse, arginfo_exosip_sendresponse, ZEND_ACC_PUBLIC)
     
     /* SUBSCRIBE/NOTIFY support */
