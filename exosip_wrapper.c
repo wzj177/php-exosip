@@ -1266,6 +1266,107 @@ int sip_send_notify_response(SipContext *ctx, int tid, int code) {
     return 0;
 }
 
+/**
+ * 发送 NOTIFY 请求（作为事件源主动通知订阅者）
+ * 用于 GB28181 目录/报警/移动位置 等事件通知
+ * 
+ * @param ctx SIP 上下文
+ * @param dialog_id 订阅对话 ID（收到 SUBSCRIBE 请求后由 PHP 层保存）
+ * @param subscription_state 订阅状态: "active", "pending", "terminated"
+ * @param reason 终止原因（仅当 state 为 terminated 时有效）: 
+ *               "deactivated", "probation", "rejected", "timeout", "giveup", "noresource"
+ * @param xml_body NOTIFY 消息体（XML 格式）
+ * @return 0 成功, -1 失败
+ */
+int sip_send_notify(SipContext *ctx, int dialog_id, const char *subscription_state, 
+                   const char *reason, const char *xml_body) {
+    if (!ctx || dialog_id <= 0) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    if (debug) {
+        fprintf(stderr, "[DEBUG] Sending NOTIFY: dialog_id=%d, state=%s, reason=%s\n", 
+                dialog_id, subscription_state ? subscription_state : "(null)",
+                reason ? reason : "(null)");
+    }
+    
+    // 解析订阅状态
+    int sub_status = EXOSIP_SUBCRSTATE_ACTIVE;  // 默认 active
+    int sub_reason = NORESOURCE;  // 默认 noresource
+    
+    if (subscription_state) {
+        if (strcasecmp(subscription_state, "pending") == 0) {
+            sub_status = EXOSIP_SUBCRSTATE_PENDING;
+        } else if (strcasecmp(subscription_state, "active") == 0) {
+            sub_status = EXOSIP_SUBCRSTATE_ACTIVE;
+        } else if (strcasecmp(subscription_state, "terminated") == 0) {
+            sub_status = EXOSIP_SUBCRSTATE_TERMINATED;
+        }
+    }
+    
+    // 解析终止原因
+    if (reason && sub_status == EXOSIP_SUBCRSTATE_TERMINATED) {
+        if (strcasecmp(reason, "deactivated") == 0) {
+            sub_reason = DEACTIVATED;
+        } else if (strcasecmp(reason, "probation") == 0) {
+            sub_reason = PROBATION;
+        } else if (strcasecmp(reason, "rejected") == 0) {
+            sub_reason = REJECTED;
+        } else if (strcasecmp(reason, "timeout") == 0) {
+            sub_reason = TIMEOUT;
+        } else if (strcasecmp(reason, "giveup") == 0) {
+            sub_reason = GIVEUP;
+        } else if (strcasecmp(reason, "noresource") == 0) {
+            sub_reason = NORESOURCE;
+        }
+    }
+    
+    osip_message_t *notify = NULL;
+    eXosip_lock(ctx->ctx);
+    
+    // 构建 NOTIFY 请求
+    int ret = eXosip_insubscription_build_notify(
+        ctx->ctx,
+        dialog_id,
+        sub_status,
+        sub_reason,
+        &notify
+    );
+    
+    if (ret != 0 || !notify) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build NOTIFY: ret=%d, dialog_id=%d\n", ret, dialog_id);
+        eXosip_unlock(ctx->ctx);
+        return -1;
+    }
+    
+    // 设置 Content-Type 和消息体
+    if (xml_body && strlen(xml_body) > 0) {
+        osip_message_set_content_type(notify, "Application/MANSCDP+xml");
+        osip_message_set_body(notify, xml_body, strlen(xml_body));
+        
+        if (debug) {
+            fprintf(stderr, "[DEBUG] NOTIFY body (%zu bytes):\n%s\n", strlen(xml_body), xml_body);
+        }
+    }
+    
+    // 发送 NOTIFY
+    ret = eXosip_insubscription_send_request(ctx->ctx, dialog_id, notify);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret != 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send NOTIFY: ret=%d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ NOTIFY sent successfully: dialog_id=%d, state=%s\n", 
+                       dialog_id, subscription_state);
+    
+    return 0;
+}
+
 // ==================== 废弃函数：订阅查询和管理已移至 PHP 层 ====================
 // 以下函数已被 SubscriptionManager（PHP + Redis）替代
 // 原因：

@@ -144,6 +144,13 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendnotifyresponse, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, code, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendnotify, 0, 0, 3)
+    ZEND_ARG_TYPE_INFO(0, dialogId, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, subscriptionState, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, body, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, reason, IS_STRING, 1, "null")
+ZEND_END_ARG_INFO()
+
 /* SipEvent class arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sipevent_gettype, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -2701,6 +2708,40 @@ PHP_METHOD(ExoSip, sendNotifyResponse) {
     RETURN_BOOL(result == 0);
 }
 
+/* ========== ExoSip::sendNotify(int $dialogId, string $subscriptionState, string $body, ?string $reason = null) ========== */
+PHP_METHOD(ExoSip, sendNotify) {
+    zend_long dialog_id;
+    zend_string *subscription_state;
+    zend_string *body;
+    zend_string *reason = NULL;
+    
+    ZEND_PARSE_PARAMETERS_START(3, 4)
+        Z_PARAM_LONG(dialog_id)
+        Z_PARAM_STR(subscription_state)
+        Z_PARAM_STR(body)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR_OR_NULL(reason)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+    
+    const char *reason_str = reason ? ZSTR_VAL(reason) : NULL;
+    
+    int result = sip_send_notify(
+        obj->ctx, 
+        (int)dialog_id, 
+        ZSTR_VAL(subscription_state),
+        reason_str,
+        ZSTR_VAL(body)
+    );
+    
+    RETURN_BOOL(result == 0);
+}
+
 /* ========== ExoSip::getFd() - 获取socket文件描述符用于外部事件循环 ========== */
 PHP_METHOD(ExoSip, getFd) {
     php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
@@ -3425,6 +3466,7 @@ const zend_function_entry exosip_methods[] = {
     PHP_ME(ExoSip, refreshSubscribe, arginfo_exosip_refreshsubscribe, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, cancelSubscribe, arginfo_exosip_cancelsubscribe, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendNotifyResponse, arginfo_exosip_sendnotifyresponse, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendNotify, arginfo_exosip_sendnotify, ZEND_ACC_PUBLIC)
     
     /* Configuration and statistics */
     PHP_ME(ExoSip, setConfig, arginfo_exosip_setconfig, ZEND_ACC_PUBLIC)

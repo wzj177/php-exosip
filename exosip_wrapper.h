@@ -459,6 +459,21 @@ int sip_cancel_subscribe(SipContext *ctx, int subscription_id);
 int sip_send_notify_response(SipContext *ctx, int tid, int code);
 
 /**
+ * 发送 NOTIFY 请求（作为事件源主动通知订阅者）
+ * 用于 GB28181 目录/报警/移动位置 等事件通知
+ * 
+ * @param ctx SIP 上下文
+ * @param dialog_id 订阅对话 ID（收到 SUBSCRIBE 请求时获得）
+ * @param subscription_state 订阅状态: "active", "pending", "terminated"
+ * @param reason 终止原因（仅当 state 为 terminated 时有效）: 
+ *               "deactivated", "probation", "rejected", "timeout", "giveup", "noresource"
+ * @param xml_body NOTIFY 消息体（XML 格式）
+ * @return 0 成功, -1 失败
+ */
+int sip_send_notify(SipContext *ctx, int dialog_id, const char *subscription_state, 
+                   const char *reason, const char *xml_body);
+
+/**
  * 获取订阅信息
  * 
  * @param ctx SIP 上下文
