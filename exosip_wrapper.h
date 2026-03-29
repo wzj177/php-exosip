@@ -592,6 +592,7 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array);
 // ==================== 发送API ====================
 int exosip_send_message_with_content_type(SipContext *ctx, const char *to, const char *message, const char *content_type);
 int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *headers);
+int exosip_send_call_answer_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *body, const char *content_type);
 zval* exosip_create_event_object(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session);
 zval* exosip_create_session_object(SessionInfo *session);
 void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array, int debug);

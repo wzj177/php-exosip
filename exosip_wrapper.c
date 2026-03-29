@@ -2161,6 +2161,71 @@ int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char 
 }
 
 /**
+ * 发送 INVITE 响应 (200 OK 带 SDP body)
+ *
+ * 用于回复收到的 INVITE 请求（如设备发起的广播 INVITE）。
+ * 与 exosip_send_response_wrapper 的区别：
+ * - send_response_wrapper 使用 eXosip_message_* API (处理 MESSAGE/REGISTER 等)
+ * - send_call_answer_wrapper 使用 eXosip_call_* API (处理 INVITE)
+ *
+ * @param ctx SIP 上下文
+ * @param tid Transaction ID (来自 SipEvent::getTid())
+ * @param code SIP 响应码 (通常是 200)
+ * @param reason 原因短语 (可选，如 "OK")
+ * @param body SDP body (可选，200 OK 时需要)
+ * @param content_type Content-Type (可选，默认 "application/sdp")
+ * @return 0 成功, -1 失败
+ */
+int exosip_send_call_answer_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *body, const char *content_type) {
+    if (!ctx || !ctx->ctx || tid <= 0) {
+        return -1;
+    }
+
+    int debug = ctx->server_info.debug;
+    osip_message_t *answer = NULL;
+
+    eXosip_lock(ctx->ctx);
+
+    int ret = eXosip_call_build_answer(ctx->ctx, tid, code, &answer);
+    if (ret != 0 || !answer) {
+        eXosip_unlock(ctx->ctx);
+        if (debug) fprintf(stderr, "[ERROR] Failed to build CALL answer: ret=%d, tid=%d, code=%d\n", ret, tid, code);
+        return -1;
+    }
+
+    // 设置 body (SDP)
+    if (body && strlen(body) > 0) {
+        const char *ct = content_type ? content_type : "application/sdp";
+        osip_message_set_body(answer, body, strlen(body));
+        osip_message_set_content_type(answer, ct);
+    }
+
+    // 设置 reason phrase
+    if (reason && strlen(reason) > 0 && answer->reason_phrase) {
+        osip_free(answer->reason_phrase);
+        answer->reason_phrase = osip_strdup(reason);
+    }
+
+    // 调试：打印完整的响应消息
+    if (debug) {
+        char *msg_str = NULL;
+        size_t msg_len = 0;
+        if (osip_message_to_str(answer, &msg_str, &msg_len) == 0 && msg_str) {
+            fprintf(stderr, "[DEBUG] Sending CALL Answer (tid=%d, code=%d):\n%s\n", tid, code, msg_str);
+            osip_free(msg_str);
+        }
+    }
+
+    int send_ret = eXosip_call_send_answer(ctx->ctx, tid, code, answer);
+
+    eXosip_unlock(ctx->ctx);
+
+    if (debug) fprintf(stderr, "[DEBUG] Send CALL answer %d result: %d (tid=%d)\n", code, send_ret, tid);
+
+    return send_ret == 0 ? 0 : -1;
+}
+
+/**
  * 创建SipEvent对象的PHP数组表示
  * @param evt eXosip事件
  * @param conn 连接信息
@@ -2238,37 +2303,49 @@ void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn,
         }
     }
 
-    // 消息体和Content-Type（参考标准GB28181实现）
+    // 消息体和Content-Type
     const char *body = NULL;
     const char *content_type = NULL;
-    
-    // 优先从响应中提取body（对于200 OK等响应事件）
-    // 如果没有响应，则从请求中提取（对于INVITE等请求事件）
-    osip_message_t *body_msg = evt->response ? evt->response : evt->request;
+
+    // 根据事件类型决定从 request 还是 response 中提取 body：
+    // - 收到请求的事件 (CALL_INVITE, MESSAGE_NEW 等): body 在 evt->request
+    //   (evt->response 可能是自动生成的 100 Trying，没有 body)
+    // - 收到响应的事件 (CALL_ANSWERED, MESSAGE_ANSWERED 等): body 在 evt->response
+    int is_request_event = (evt->type == EXOSIP_CALL_INVITE ||
+                            evt->type == EXOSIP_CALL_REINVITE ||
+                            evt->type == EXOSIP_CALL_ACK ||
+                            evt->type == EXOSIP_CALL_CANCELLED ||
+                            evt->type == EXOSIP_MESSAGE_NEW);
+
+    osip_message_t *body_msg = is_request_event
+        ? (evt->request ? evt->request : evt->response)
+        : (evt->response ? evt->response : evt->request);
+
     if (debug) {
-        fprintf(stderr, "[C-DEBUG] body_msg source: %s (evt->type=%d)\n", 
-                evt->response ? "response" : (evt->request ? "request" : "NULL"), evt->type);
+        fprintf(stderr, "[C-DEBUG] evt->type=%d, is_request_event=%d, body_msg source: %s\n",
+                evt->type, is_request_event,
+                (body_msg == evt->request) ? "request" : (body_msg == evt->response ? "response" : "NULL"));
     }
-    
+
     if (body_msg) {
         // 使用标准osip API获取body
         osip_body_t *osip_body = NULL;
         int ret = osip_message_get_body(body_msg, 0, &osip_body);
-        if (debug) fprintf(stderr, "[C-DEBUG] osip_message_get_body returned: %d\n", ret);
-        
+        if (debug) fprintf(stderr, "[C-DEBUG] osip_message_get_body returned: %d, osip_body=%p\n", ret, (void*)osip_body);
+
         if (ret == 0 && osip_body && osip_body->body) {
             body = osip_body->body;
             if (debug) {
-                fprintf(stderr, "[C-DEBUG] Body extracted (length=%zu):\n%s\n", 
+                fprintf(stderr, "[C-DEBUG] Body extracted (length=%zu):\n%s\n",
                         strlen(body), body);
             }
         } else {
             if (debug) {
-                fprintf(stderr, "[C-DEBUG] No body found (ret=%d, osip_body=%p)\n", 
+                fprintf(stderr, "[C-DEBUG] No body found (ret=%d, osip_body=%p)\n",
                         ret, (void*)osip_body);
             }
         }
-        
+
         // 获取Content-Type
         osip_content_type_t *ct = osip_message_get_content_type(body_msg);
         if (ct && ct->type && ct->subtype) {

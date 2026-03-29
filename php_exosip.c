@@ -74,6 +74,14 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendresponse, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 1)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendcallanswer, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, tid, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, code, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, body, IS_STRING, 1)
+    ZEND_ARG_TYPE_INFO(0, reason, IS_STRING, 1)
+    ZEND_ARG_TYPE_INFO(0, contentType, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getfd, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
@@ -2614,8 +2622,33 @@ PHP_METHOD(ExoSip, sendResponse) {
         } ZEND_HASH_FOREACH_END();
     }
 
-    int result = exosip_send_response_wrapper(obj->ctx, (int)tid, (int)code, reason, 
+    int result = exosip_send_response_wrapper(obj->ctx, (int)tid, (int)code, reason,
                                               headers_str[0] ? headers_str : NULL);
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::sendCallAnswer(int $tid, int $code, string $body, string $reason, string $contentType) ========== */
+PHP_METHOD(ExoSip, sendCallAnswer) {
+    zend_long tid, code;
+    char *body = NULL, *reason = NULL, *content_type = NULL;
+    size_t body_len = 0, reason_len = 0, content_type_len = 0;
+
+    ZEND_PARSE_PARAMETERS_START(2, 5)
+        Z_PARAM_LONG(tid)
+        Z_PARAM_LONG(code)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STRING_OR_NULL(body, body_len)
+        Z_PARAM_STRING_OR_NULL(reason, reason_len)
+        Z_PARAM_STRING_OR_NULL(content_type, content_type_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+
+    int result = exosip_send_call_answer_wrapper(obj->ctx, (int)tid, (int)code, reason, body, content_type);
     RETURN_BOOL(result == 0);
 }
 
@@ -3460,7 +3493,8 @@ const zend_function_entry exosip_methods[] = {
     PHP_ME(ExoSip, sendAck, arginfo_exosip_sendack, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendInfo, arginfo_exosip_sendinfo, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendResponse, arginfo_exosip_sendresponse, ZEND_ACC_PUBLIC)
-    
+    PHP_ME(ExoSip, sendCallAnswer, arginfo_exosip_sendcallanswer, ZEND_ACC_PUBLIC)
+
     /* SUBSCRIBE/NOTIFY support */
     PHP_ME(ExoSip, subscribe, arginfo_exosip_subscribe, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, refreshSubscribe, arginfo_exosip_refreshsubscribe, ZEND_ACC_PUBLIC)
