@@ -3277,7 +3277,17 @@ int sip_start_master_process(SipContext *ctx) {
     if (sip_fork_worker(ctx) < 0) {
         return -1;
     }
-    
+
+    // Master: 追加写入 Worker PID 到 PID 文件（用于状态查询时正确区分进程类型）
+    if (!ctx->is_worker && ctx->worker_pid > 0 && strlen(ctx->pid_file) > 0) {
+        FILE *fp = fopen(ctx->pid_file, "a");
+        if (fp) {
+            fprintf(fp, "%d\n", ctx->worker_pid);
+            fclose(fp);
+            fprintf(stderr, "[Master] Worker PID appended to PID file: worker_pid=%d\n", ctx->worker_pid);
+        }
+    }
+
     // Worker 进程：分配 Long Task 数组（但不预先 fork）
     if (ctx->is_worker) {
         if (ctx->long_task_count > 0) {
@@ -4103,20 +4113,26 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
     pid_t master_pid = 0;
     int task_count = 0;
     int long_task_count = 0;
+    pid_t worker_pid = 0;
     char cmd[512];  // 声明 cmd 缓冲区
-    
-    // 读取 Master PID 和进程配置
+
+    // 读取 PID 文件格式：
+    //   Line1: master_pid
+    //   Line2: task_count
+    //   Line3: long_task_count
+    //   Line4: worker_pid (追加写入，由 sip_start_master_process 在 fork Worker 后写入)
     if (fscanf(fp, "%d", &master_pid) != 1) {
         fclose(fp);
         return -1;
     }
-    // 尝试读取 task_count 和 long_task_count（兼容旧版本）
+    // 尝试读取 task_count、long_task_count、worker_pid（兼容旧版本）
     fscanf(fp, "%d", &task_count);
     fscanf(fp, "%d", &long_task_count);
+    fscanf(fp, "%d", &worker_pid);
     fclose(fp);
-    
-    fprintf(stderr, "[DEBUG] Read from PID file: master=%d, tasks=%d, long_tasks=%d\n",
-            master_pid, task_count, long_task_count);
+
+    fprintf(stderr, "[DEBUG] Read from PID file: master=%d, tasks=%d, long_tasks=%d, worker=%d\n",
+            master_pid, task_count, long_task_count, worker_pid);
     
     // 检查 Master 进程是否存在
     if (kill(master_pid, 0) != 0) {
@@ -4216,16 +4232,34 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
         }
         pclose(ps);
         
-        // 第一个子进程通常是 Worker
-        if (child_count > 0) {
+        // 正确识别 Worker 进程：
+        // fork 顺序：Task-0..N（先，PID 小） → Worker（后，PID 大）
+        // ps 按 PID 升序返回，所以 child_pids[0..task_count-1] = Tasks，
+        // child_pids[task_count] = Worker。
+        // 若 PID 文件中有 worker_pid（第4行），优先使用它来精确匹配。
+        pid_t actual_worker_pid = 0;
+        if (worker_pid > 0) {
+            // PID 文件记录了 Worker PID，直接使用
+            actual_worker_pid = worker_pid;
+        } else if (child_count > task_count) {
+            // 兼容旧版本 PID 文件（无 worker_pid 行）：
+            // Task 先 fork（PID 小），Worker 后 fork（PID 大），取索引 task_count
+            actual_worker_pid = child_pids[task_count];
+        } else if (child_count > 0) {
+            // 降级：只有一个子进程时，认为是 Worker
+            actual_worker_pid = child_pids[child_count - 1];
+        }
+
+        // 填充 Worker 信息
+        if (actual_worker_pid > 0 && kill(actual_worker_pid, 0) == 0) {
             zval worker_info;
             array_init(&worker_info);
-            add_assoc_long(&worker_info, "pid", child_pids[0]);
+            add_assoc_long(&worker_info, "pid", actual_worker_pid);
             add_assoc_string(&worker_info, "status", "running");
-            
+
             // 获取 Worker 进程内存和 FD
 #ifdef __APPLE__
-            snprintf(cmd, sizeof(cmd), "ps -o rss=,vsz= -p %d", child_pids[0]);
+            snprintf(cmd, sizeof(cmd), "ps -o rss=,vsz= -p %d", actual_worker_pid);
             FILE *ps_worker = popen(cmd, "r");
             if (ps_worker) {
                 long rss_kb = 0, vsz_kb = 0;
@@ -4235,8 +4269,8 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
                 }
                 pclose(ps_worker);
             }
-            
-            snprintf(cmd, sizeof(cmd), "lsof -p %d 2>/dev/null | wc -l", child_pids[0]);
+
+            snprintf(cmd, sizeof(cmd), "lsof -p %d 2>/dev/null | wc -l", actual_worker_pid);
             FILE *lsof_worker = popen(cmd, "r");
             if (lsof_worker) {
                 int fd_count = 0;
@@ -4245,73 +4279,154 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
                 }
                 pclose(lsof_worker);
             }
+#else
+            snprintf(cmd, sizeof(cmd), "/proc/%d/status", actual_worker_pid);
+            FILE *wstatus = fopen(cmd, "r");
+            if (wstatus) {
+                char line[256];
+                while (fgets(line, sizeof(line), wstatus)) {
+                    if (strncmp(line, "VmRSS:", 6) == 0) {
+                        long rss_kb;
+                        if (sscanf(line + 6, "%ld", &rss_kb) == 1)
+                            add_assoc_long(&worker_info, "memory_rss_kb", rss_kb);
+                    } else if (strncmp(line, "VmSize:", 7) == 0) {
+                        long vsz_kb;
+                        if (sscanf(line + 7, "%ld", &vsz_kb) == 1)
+                            add_assoc_long(&worker_info, "memory_vsz_kb", vsz_kb);
+                    }
+                }
+                fclose(wstatus);
+            }
+            snprintf(cmd, sizeof(cmd), "/proc/%d/fd", actual_worker_pid);
+            DIR *wfd_dir = opendir(cmd);
+            if (wfd_dir) {
+                int fd_count = 0;
+                struct dirent *wentry;
+                while ((wentry = readdir(wfd_dir)) != NULL) {
+                    if (wentry->d_name[0] != '.') fd_count++;
+                }
+                closedir(wfd_dir);
+                add_assoc_long(&worker_info, "fd_count", fd_count);
+            }
 #endif
-            
+
             add_assoc_zval(status_array, "worker", &worker_info);
         }
-        
-        // 根据 PID 文件中的配置信息正确区分 Task 和 Long Task
-        // fork 顺序：Worker (child_pids[0]) → Tasks → Long Tasks
-        
-        if (child_count > 1) {
+
+        // Task 进程：Master 的直接子进程中排除 Worker，剩余的是 Task
+        if (child_count > 0) {
             zval tasks_array;
             array_init(&tasks_array);
-            
-            zval long_tasks_array;
-            array_init(&long_tasks_array);
-            
-            // 子进程分布：
-            // child_pids[0] = Worker
-            // child_pids[1..task_count] = Tasks
-            // child_pids[task_count+1..task_count+long_task_count] = Long Tasks
-            
-            for (int i = 1; i < child_count; i++) {
+
+            int task_idx = 0;
+            for (int i = 0; i < child_count; i++) {
+                if (child_pids[i] == actual_worker_pid) continue;  // 跳过 Worker
+
                 zval process_info;
                 array_init(&process_info);
                 add_assoc_long(&process_info, "pid", child_pids[i]);
-                add_assoc_string(&process_info, "status", "running");
-                
-                // 获取进程内存
+                int is_alive = (kill(child_pids[i], 0) == 0);
+                add_assoc_string(&process_info, "status", is_alive ? "running" : "dead");
+
 #ifdef __APPLE__
                 snprintf(cmd, sizeof(cmd), "ps -o rss= -p %d", child_pids[i]);
                 FILE *ps_proc = popen(cmd, "r");
                 if (ps_proc) {
                     long rss_kb = 0;
-                    if (fscanf(ps_proc, "%ld", &rss_kb) == 1) {
+                    if (fscanf(ps_proc, "%ld", &rss_kb) == 1)
                         add_assoc_long(&process_info, "memory_rss_kb", rss_kb);
-                    }
                     pclose(ps_proc);
                 }
-#endif
-                
-                // 根据索引判断进程类型
-                if (i <= task_count) {
-                    // Task 进程
-                    add_assoc_long(&process_info, "id", i - 1);
-                    add_next_index_zval(&tasks_array, &process_info);
-                } else if (i <= task_count + long_task_count) {
-                    // Long Task 进程
-                    add_assoc_long(&process_info, "id", i - task_count - 1);
-                    add_next_index_zval(&long_tasks_array, &process_info);
-                } else {
-                    // 未知进程（不应该出现）
-                    zval_ptr_dtor(&process_info);
+#else
+                snprintf(cmd, sizeof(cmd), "/proc/%d/status", child_pids[i]);
+                FILE *tstat = fopen(cmd, "r");
+                if (tstat) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), tstat)) {
+                        if (strncmp(line, "VmRSS:", 6) == 0) {
+                            long rss_kb;
+                            if (sscanf(line + 6, "%ld", &rss_kb) == 1)
+                                add_assoc_long(&process_info, "memory_rss_kb", rss_kb);
+                            break;
+                        }
+                    }
+                    fclose(tstat);
                 }
+#endif
+
+                add_assoc_long(&process_info, "id", task_idx++);
+                add_next_index_zval(&tasks_array, &process_info);
             }
-            
-            if (task_count > 0) {
+
+            if (task_idx > 0) {
                 add_assoc_zval(status_array, "tasks", &tasks_array);
             } else {
                 zval_ptr_dtor(&tasks_array);
             }
-            
-            if (long_task_count > 0) {
-                add_assoc_zval(status_array, "long_tasks", &long_tasks_array);
+        }
+
+        // Long Task 进程：Worker 的子进程（ppid = actual_worker_pid）
+        if (long_task_count > 0 && actual_worker_pid > 0) {
+            zval long_tasks_array;
+            array_init(&long_tasks_array);
+
+#ifdef __APPLE__
+            snprintf(cmd, sizeof(cmd), "ps -o pid=,ppid= -A | awk '$2 == %d {print $1}'", actual_worker_pid);
+#else
+            snprintf(cmd, sizeof(cmd), "ps --ppid %d -o pid=", actual_worker_pid);
+#endif
+            FILE *ps_lt = popen(cmd, "r");
+            if (ps_lt) {
+                pid_t lt_pid;
+                int lt_idx = 0;
+                while (fscanf(ps_lt, "%d", &lt_pid) == 1) {
+                    zval lt_info;
+                    array_init(&lt_info);
+                    add_assoc_long(&lt_info, "id", lt_idx);
+                    add_assoc_long(&lt_info, "pid", lt_pid);
+                    int lt_alive = (kill(lt_pid, 0) == 0);
+                    add_assoc_string(&lt_info, "status", lt_alive ? "running" : "dead");
+
+#ifdef __APPLE__
+                    snprintf(cmd, sizeof(cmd), "ps -o rss= -p %d", lt_pid);
+                    FILE *ps_ltm = popen(cmd, "r");
+                    if (ps_ltm) {
+                        long rss_kb = 0;
+                        if (fscanf(ps_ltm, "%ld", &rss_kb) == 1)
+                            add_assoc_long(&lt_info, "memory_rss_kb", rss_kb);
+                        pclose(ps_ltm);
+                    }
+#else
+                    snprintf(cmd, sizeof(cmd), "/proc/%d/status", lt_pid);
+                    FILE *ltstat = fopen(cmd, "r");
+                    if (ltstat) {
+                        char line[256];
+                        while (fgets(line, sizeof(line), ltstat)) {
+                            if (strncmp(line, "VmRSS:", 6) == 0) {
+                                long rss_kb;
+                                if (sscanf(line + 6, "%ld", &rss_kb) == 1)
+                                    add_assoc_long(&lt_info, "memory_rss_kb", rss_kb);
+                                break;
+                            }
+                        }
+                        fclose(ltstat);
+                    }
+#endif
+                    add_next_index_zval(&long_tasks_array, &lt_info);
+                    lt_idx++;
+                }
+                pclose(ps_lt);
+
+                if (lt_idx > 0) {
+                    add_assoc_zval(status_array, "long_tasks", &long_tasks_array);
+                } else {
+                    zval_ptr_dtor(&long_tasks_array);
+                }
             } else {
                 zval_ptr_dtor(&long_tasks_array);
             }
         }
-        
+
         add_assoc_long(status_array, "total_processes", child_count + 1);
     }
     
