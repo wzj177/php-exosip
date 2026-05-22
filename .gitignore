@@ -10,7 +10,7 @@
 .libs/
 .deps/
 modules/
-
+build/
 # Autotools 生成文件
 autom4te.cache/
 config.h
