@@ -44,11 +44,20 @@ if test "$PHP_EXOSIP" != "no"; then
     AC_MSG_ERROR([libosipparser2.a not found in $EXOSIP_LIB_DIR])
   fi
   
+  dnl Determine include directory structure (support both layouts)
+  if test -d "$EXOSIP_DIR/include"; then
+    EXOSIP_INC_DIR="$EXOSIP_DIR/include"
+  elif test -d "$EXOSIP_DIR/libs/include"; then
+    EXOSIP_INC_DIR="$EXOSIP_DIR/libs/include"
+  else
+    AC_MSG_ERROR([Cannot find include directory in $EXOSIP_DIR])
+  fi
+
   dnl Add include paths
-  PHP_ADD_INCLUDE([$EXOSIP_DIR/libs/include])
-  PHP_ADD_INCLUDE([$EXOSIP_DIR/libs/include/eXosip2])
-  PHP_ADD_INCLUDE([$EXOSIP_DIR/libs/include/osip2])
-  PHP_ADD_INCLUDE([$EXOSIP_DIR/libs/include/osipparser2])
+  PHP_ADD_INCLUDE([$EXOSIP_INC_DIR])
+  PHP_ADD_INCLUDE([$EXOSIP_INC_DIR/eXosip2])
+  PHP_ADD_INCLUDE([$EXOSIP_INC_DIR/osip2])
+  PHP_ADD_INCLUDE([$EXOSIP_INC_DIR/osipparser2])
   
   dnl Add static libraries with platform-specific flags
   case $host_os in
