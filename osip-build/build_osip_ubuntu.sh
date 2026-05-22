@@ -1,8 +1,7 @@
 #!/bin/bash
-
 set -e
 
-# Ubuntu/Debian 编译脚本 - 简化版
+# Ubuntu/Debian 编译脚本 - 优化版
 # 用法: ./build_osip_ubuntu.sh [--build-dir PATH] [--output-dir PATH]
 
 show_help() {
@@ -11,8 +10,8 @@ show_help() {
     echo "用法: $0 [选项]"
     echo ""
     echo "选项:"
-    echo "  --build-dir PATH    指定编译目录（默认: ./build_osip_src）"
-    echo "  --output-dir PATH   指定库输出目录（默认: ./libs）"
+    echo "  --build-dir PATH    指定编译目录(默认: ./build_osip_src)"
+    echo "  --output-dir PATH   指定库输出目录(默认: ./libs)"
     echo "  -h, --help          显示此帮助信息"
     echo ""
     echo "示例:"
@@ -58,8 +57,21 @@ echo "📂 输出目录: $OUTPUT_DIR"
 echo "🔍 检查系统依赖..."
 MISSING_PACKAGES=()
 
-for pkg in gcc make autoconf automake libtool pkg-config curl libc-ares-dev; do
-    if ! dpkg -l | grep -q "^ii  $pkg "; then
+# 1. 检查命令行工具
+for cmd in gcc make autoconf automake libtool curl; do
+    if ! command -v "$cmd" &> /dev/null; then
+        MISSING_PACKAGES+=("$cmd")
+    fi
+done
+
+# 2. 特殊检查 pkg-config (兼容 pkgconf)
+if ! command -v pkg-config &> /dev/null && ! command -v pkgconf &> /dev/null; then
+    MISSING_PACKAGES+=("pkg-config")
+fi
+
+# 3. 检查开发库 (使用 dpkg-query 模糊匹配)
+for pkg in libc-ares-dev; do
+    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed"; then
         MISSING_PACKAGES+=("$pkg")
     fi
 done
@@ -136,6 +148,6 @@ make install
 cd ../..
 
 echo ""
-echo "✅ Ubuntu/Debian 编译成功！"
-echo "📂 输出目录：$OUTPUT_DIR"
+echo "✅ Ubuntu/Debian 编译成功!"
+echo "📂 输出目录: $OUTPUT_DIR"
 ls -lh "$OUTPUT_DIR/lib/"lib*.a 2>/dev/null || echo "没有找到静态库文件"
