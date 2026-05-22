@@ -67,15 +67,13 @@ if test "$PHP_EXOSIP" != "no"; then
       PHP_EVAL_LIBLINE([-framework CFNetwork -framework CoreFoundation -framework SystemConfiguration -lresolv], [EXOSIP_SHARED_LIBADD])
       ;;
     linux*)
-      dnl Linux: Use --whole-archive
-      EXTRA_LDFLAGS="$EXTRA_LDFLAGS -Wl,--whole-archive"
-      EXTRA_LDFLAGS="$EXTRA_LDFLAGS -Wl,--start-group"
+      dnl Linux: --whole-archive must wrap the .a files in EXOSIP_SHARED_LIBADD
+      dnl so they appear in the correct order in the final link command.
+      PHP_EVAL_LIBLINE([-Wl,--whole-archive -Wl,--start-group], [EXOSIP_SHARED_LIBADD])
       EXOSIP_SHARED_LIBADD="$EXOSIP_SHARED_LIBADD $EXOSIP_LIB_DIR/libosipparser2.a"
       EXOSIP_SHARED_LIBADD="$EXOSIP_SHARED_LIBADD $EXOSIP_LIB_DIR/libosip2.a"
       EXOSIP_SHARED_LIBADD="$EXOSIP_SHARED_LIBADD $EXOSIP_LIB_DIR/libeXosip2.a"
-      EXTRA_LDFLAGS="$EXTRA_LDFLAGS -Wl,--end-group"
-      EXTRA_LDFLAGS="$EXTRA_LDFLAGS -Wl,--no-whole-archive"
-      PHP_EVAL_LIBLINE([-lresolv -lpthread -lrt -ldl], [EXOSIP_SHARED_LIBADD])
+      PHP_EVAL_LIBLINE([-Wl,--end-group -Wl,--no-whole-archive -lresolv -lpthread -lrt -ldl], [EXOSIP_SHARED_LIBADD])
       ;;
     *)
       EXOSIP_SHARED_LIBADD="$EXOSIP_SHARED_LIBADD $EXOSIP_LIB_DIR/libeXosip2.a $EXOSIP_LIB_DIR/libosip2.a $EXOSIP_LIB_DIR/libosipparser2.a"
