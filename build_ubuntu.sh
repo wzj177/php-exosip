@@ -163,24 +163,40 @@ build_libs() {
     mkdir -p "$build_src"
     pushd "$build_src" >/dev/null
 
-    if [ ! -d "osip2" ]; then
+    # 版本号转短格式: 5.3.0 → 530
+    local ver_short
+    ver_short="$(echo "${OSIP_VERSION}" | tr -d '.')"
+
+    # 优先使用带版本号的本地目录（如 osip2-530），其次是 osip2，再次下载
+    local osip_src="osip2"
+    if [ -d "osip2-${ver_short}" ]; then
+        osip_src="osip2-${ver_short}"
+        echo "📂 使用本地源目录: ${osip_src}"
+    elif [ ! -d "osip2" ]; then
+        echo "📥 下载 libosip2-${OSIP_VERSION}..."
         curl -L "https://www.antisip.com/download/exosip2/libosip2-${OSIP_VERSION}.tar.gz" | tar -xzf -
         mv "libosip2-${OSIP_VERSION}" osip2
     fi
 
-    if [ ! -d "eXosip2" ]; then
+    local exosip_src="eXosip2"
+    if [ -d "eXosip2-${ver_short}" ]; then
+        exosip_src="eXosip2-${ver_short}"
+        echo "📂 使用本地源目录: ${exosip_src}"
+    elif [ ! -d "eXosip2" ]; then
+        echo "📥 下载 libexosip2-${EXOSIP_VERSION}..."
         curl -L "https://www.antisip.com/download/exosip2/libexosip2-${EXOSIP_VERSION}.tar.gz" | tar -xzf -
         mv "libexosip2-${EXOSIP_VERSION}" eXosip2
     fi
 
-    pushd osip2 >/dev/null
+    pushd "${osip_src}" >/dev/null
     ./configure \
         CFLAGS="-O2 -fPIC" \
-        --prefix="${libs_dir}" --disable-shared --enable-static --disable-dependency-tracking
+        --prefix="${libs_dir}" --disable-shared --enable-static \
+        --enable-mt --disable-dependency-tracking
     make -j"${JOBS}" && make install
     popd >/dev/null
 
-    pushd eXosip2 >/dev/null
+    pushd "${exosip_src}" >/dev/null
     export PKG_CONFIG_PATH="${libs_dir}/lib/pkgconfig"
     ./configure \
         CFLAGS="-O2 -fPIC -I${libs_dir}/include" \

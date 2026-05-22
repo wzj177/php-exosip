@@ -74,21 +74,37 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
 # =============== 下载 ===============
-if [ ! -d "osip2" ]; then
-  echo "📥 下载 libosip2-5.3.0..."
-  curl -# -L "https://www.antisip.com/download/exosip2/libosip2-5.3.0.tar.gz" | tar -xzf -
-  mv libosip2-5.3.0 osip2
+OSIP_VER="5.3.0"
+EXOSIP_VER="5.3.0"
+VER_SHORT="$(echo "$OSIP_VER" | tr -d '.')"   # 5.3.0 → 530
+
+if [ -d "osip2-${VER_SHORT}" ]; then
+  OSIP_SRC="osip2-${VER_SHORT}"
+  echo "📂 使用本地源目录: ${OSIP_SRC}"
+elif [ -d "osip2" ]; then
+  OSIP_SRC="osip2"
+else
+  echo "📥 下载 libosip2-${OSIP_VER}..."
+  curl -# -L "https://www.antisip.com/download/exosip2/libosip2-${OSIP_VER}.tar.gz" | tar -xzf -
+  mv "libosip2-${OSIP_VER}" osip2
+  OSIP_SRC="osip2"
 fi
 
-if [ ! -d "eXosip2" ]; then
-  echo "📥 下载 libexosip2-5.3.0..."
-  curl -# -L "https://www.antisip.com/download/exosip2/libexosip2-5.3.0.tar.gz" | tar -xzf -
-  mv libexosip2-5.3.0 eXosip2
+if [ -d "eXosip2-${VER_SHORT}" ]; then
+  EXOSIP_SRC="eXosip2-${VER_SHORT}"
+  echo "📂 使用本地源目录: ${EXOSIP_SRC}"
+elif [ -d "eXosip2" ]; then
+  EXOSIP_SRC="eXosip2"
+else
+  echo "📥 下载 libexosip2-${EXOSIP_VER}..."
+  curl -# -L "https://www.antisip.com/download/exosip2/libexosip2-${EXOSIP_VER}.tar.gz" | tar -xzf -
+  mv "libexosip2-${EXOSIP_VER}" eXosip2
+  EXOSIP_SRC="eXosip2"
 fi
 
 # =============== 编译 osip2 ===============
-echo "🔧 编译 osip2..."
-cd osip2
+echo "🔧 编译 osip2 (${OSIP_SRC})..."
+cd "${OSIP_SRC}"
 
 ./configure \
   CC="$CC" \
@@ -96,6 +112,7 @@ cd osip2
   --prefix="$OUTPUT_DIR" \
   --disable-shared \
   --enable-static \
+  --enable-mt \
   --disable-dependency-tracking \
   || { echo "❌ osip2 configure 失败"; exit 1; }
 
@@ -106,8 +123,8 @@ make install
 cd ..
 
 # =============== 编译 eXosip2 ===============
-echo "🔧 编译 eXosip2..."
-cd eXosip2
+echo "🔧 编译 eXosip2 (${EXOSIP_SRC})..."
+cd "${EXOSIP_SRC}"
 
 export PKG_CONFIG_PATH="$OUTPUT_DIR/lib/pkgconfig:$PKG_CONFIG_PATH"
 
