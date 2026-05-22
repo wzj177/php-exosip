@@ -97,15 +97,21 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
 # =============== 下载 ===============
+# 添加浏览器 User-Agent (-A) 避免被服务器防火墙拦截拦截返回 HTML
+CURL_OPTS="-# -L -f -A Mozilla/5.0"
+
 if [ ! -d "osip2" ]; then
   echo "📥 下载 libosip2-5.3.0..."
-  curl -# -L "https://antisip.com" | tar -xzf -
+  # 优先使用官方镜像，如遭遇404则自动降级到 GNU 镜像
+  $curl_cmd $CURL_OPTS "https://antisip.com" | tar -xzf - || \
+  $curl_cmd $CURL_OPTS "https://gnu.org" | tar -xzf -
   mv libosip2-5.3.0 osip2
 fi
 
 if [ ! -d "eXosip2" ]; then
   echo "📥 下载 libexosip2-5.3.0..."
-  curl -# -L "https://antisip.com" | tar -xzf -
+  $curl_cmd $CURL_OPTS "https://antisip.com" | tar -xzf - || \
+  $curl_cmd $CURL_OPTS "https://download.savannah.nongnu.org/releases/exosip/libexosip2-5.3.0.tar.gz" | tar -xzf -
   mv libexosip2-5.3.0 eXosip2
 fi
 
