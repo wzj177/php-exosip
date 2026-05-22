@@ -223,6 +223,13 @@ cd "$SCRIPT_DIR"
 "$PHPIZE_BIN"
 ./configure --enable-exosip="${EXOSIP_DIR}" --with-php-config="${PHP_CONFIG}"
 make clean || true
+
+# make clean 可能清理掉 osip 静态库，重新编译
+if [ ! -f "${EXOSIP_DIR}/lib/libeXosip2.a" ]; then
+    echo "📦 静态库被清理，重新编译..."
+    "${SCRIPT_DIR}/osip-build/build_osip_ubuntu.sh" --output-dir "${EXOSIP_DIR}"
+fi
+
 make -j"${JOBS}"
 
 # ============================================================
