@@ -21,6 +21,7 @@ config.cache
 config.nice
 configure
 aclocal.m4
+configure.ac
 libtool
 Makefile
 Makefile.fragments

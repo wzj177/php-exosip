@@ -174,13 +174,20 @@ build_libs() {
     fi
 
     pushd osip2 >/dev/null
-    ./configure --prefix="${libs_dir}" --disable-shared --enable-static
+    ./configure \
+        CFLAGS="-O2 -fPIC" \
+        --prefix="${libs_dir}" --disable-shared --enable-static --disable-dependency-tracking
     make -j"${JOBS}" && make install
     popd >/dev/null
 
     pushd eXosip2 >/dev/null
     export PKG_CONFIG_PATH="${libs_dir}/lib/pkgconfig"
-    ./configure --prefix="${libs_dir}" --disable-shared --enable-static --disable-openssl
+    ./configure \
+        CFLAGS="-O2 -fPIC -I${libs_dir}/include" \
+        LDFLAGS="-L${libs_dir}/lib" \
+        PKG_CONFIG_PATH="${libs_dir}/lib/pkgconfig" \
+        --prefix="${libs_dir}" --disable-shared --enable-static --disable-openssl \
+        --disable-dependency-tracking
     make -j"${JOBS}" && make install
     popd >/dev/null
 
