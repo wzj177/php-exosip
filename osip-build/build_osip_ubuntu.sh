@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Ubuntu/Debian 编译脚本 - 优化版
+# Ubuntu/Debian 编译脚本 - 稳定检测版
 # 用法: ./build_osip_ubuntu.sh [--build-dir PATH] [--output-dir PATH]
 
 show_help() {
@@ -57,29 +57,34 @@ echo "📂 输出目录: $OUTPUT_DIR"
 echo "🔍 检查系统依赖..."
 MISSING_PACKAGES=()
 
-# 1. 检查命令行工具
-for cmd in gcc make autoconf automake libtool curl; do
-    if ! command -v "$cmd" &> /dev/null; then
-        MISSING_PACKAGES+=("$cmd")
-    fi
-done
+# 所有需要包名级验证的依赖
+REQUIRED_PKGS=(gcc make autoconf automake libtool curl libc-ares-dev)
 
-# 2. 特殊检查 pkg-config (兼容 pkgconf)
-if ! command -v pkg-config &> /dev/null && ! command -v pkgconf &> /dev/null; then
-    MISSING_PACKAGES+=("pkg-config")
-fi
-
-# 3. 检查开发库 (使用 dpkg-query 模糊匹配)
-for pkg in libc-ares-dev; do
+for pkg in "${REQUIRED_PKGS[@]}"; do
+    # 使用 dpkg-query 检查安装状态，并移除底层架构名后缀(如 :amd64)的影响
     if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed"; then
+        # 针对 pkg-config / pkgconf 的平替策略
+        if [ "$pkg" = "pkg-config" ]; then
+            if dpkg-query -W -f='${Status}' "pkgconf" 2>/dev/null | grep -q "ok installed"; then
+                continue
+            fi
+        fi
         MISSING_PACKAGES+=("$pkg")
     fi
 done
 
+# 单独对 pkg-config 补充加入队列（如果上一步循环里没算进去）
+if ! dpkg-query -W -f='${Status}' "pkg-config" 2>/dev/null | grep -q "ok installed" && \
+   ! dpkg-query -W -f='${Status}' "pkgconf" 2>/dev/null | grep -q "ok installed"; then
+    MISSING_PACKAGES+=("pkg-config")
+fi
+
 if [ ${#MISSING_PACKAGES[@]} -ne 0 ]; then
-    echo "❌ 缺少必要的包: ${MISSING_PACKAGES[*]}"
+    # 去重
+    UNIQUE_MISSING=($(echo "${MISSING_PACKAGES[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+    echo "❌ 缺少必要的包: ${UNIQUE_MISSING[*]}"
     echo "请运行以下命令安装依赖:"
-    echo "sudo apt update && sudo apt install -y ${MISSING_PACKAGES[*]}"
+    echo "sudo apt update && sudo apt install -y ${UNIQUE_MISSING[*]}"
     exit 1
 fi
 
@@ -94,13 +99,13 @@ cd "$BUILD_DIR"
 # =============== 下载 ===============
 if [ ! -d "osip2" ]; then
   echo "📥 下载 libosip2-5.3.0..."
-  curl -# -L "https://www.antisip.com/download/exosip2/libosip2-5.3.0.tar.gz" | tar -xzf -
+  curl -# -L "https://antisip.com" | tar -xzf -
   mv libosip2-5.3.0 osip2
 fi
 
 if [ ! -d "eXosip2" ]; then
   echo "📥 下载 libexosip2-5.3.0..."
-  curl -# -L "https://www.antisip.com/download/exosip2/libexosip2-5.3.0.tar.gz" | tar -xzf -
+  curl -# -L "https://antisip.com" | tar -xzf -
   mv libexosip2-5.3.0 eXosip2
 fi
 
