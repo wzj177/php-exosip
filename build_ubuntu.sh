@@ -219,8 +219,10 @@ fi
 # ============================================================
 cd "$SCRIPT_DIR"
 
+"$PHPIZE_BIN" --clean
 "$PHPIZE_BIN"
 ./configure --enable-exosip="${EXOSIP_DIR}" --with-php-config="${PHP_CONFIG}"
+make clean || true
 make -j"${JOBS}"
 
 # ============================================================
