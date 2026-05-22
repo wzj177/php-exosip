@@ -1,8 +1,7 @@
 #!/bin/bash
 set -e
 
-# Ubuntu/Debian 编译脚本 - 稳定检测版
-# 用法: ./build_osip_ubuntu.sh [--build-dir PATH] [--output-dir PATH]
+# Ubuntu/Debian 编译脚本 - 简化版
 
 show_help() {
     echo "🔧 Ubuntu/Debian OSIP/eXOSIP 编译脚本"
@@ -13,11 +12,6 @@ show_help() {
     echo "  --build-dir PATH    指定编译目录(默认: ./build_osip_src)"
     echo "  --output-dir PATH   指定库输出目录(默认: ./libs)"
     echo "  -h, --help          显示此帮助信息"
-    echo ""
-    echo "示例:"
-    echo "  $0                              # 使用默认目录"
-    echo "  $0 --build-dir /tmp/build       # 指定编译目录"
-    echo "  $0 --output-dir ~/mylibs        # 指定输出目录"
 }
 
 # 默认值
@@ -53,40 +47,23 @@ echo "============================================"
 echo "📂 编译目录: $BUILD_DIR"
 echo "📂 输出目录: $OUTPUT_DIR"
 
-# 检查依赖
+# ================= 修复点：依赖检测 =================
 echo "🔍 检查系统依赖..."
 MISSING_PACKAGES=()
 
-# 所有需要包名级验证的依赖
-REQUIRED_PKGS=(gcc make autoconf automake libtool curl libc-ares-dev)
-
-for pkg in "${REQUIRED_PKGS[@]}"; do
-    # 使用 dpkg-query 检查安装状态，并移除底层架构名后缀(如 :amd64)的影响
-    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed"; then
-        # 针对 pkg-config / pkgconf 的平替策略
-        if [ "$pkg" = "pkg-config" ]; then
-            if dpkg-query -W -f='${Status}' "pkgconf" 2>/dev/null | grep -q "ok installed"; then
-                continue
-            fi
-        fi
+for pkg in gcc make autoconf automake libtool pkg-config libc-ares-dev; do
+    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
         MISSING_PACKAGES+=("$pkg")
     fi
 done
 
-# 单独对 pkg-config 补充加入队列（如果上一步循环里没算进去）
-if ! dpkg-query -W -f='${Status}' "pkg-config" 2>/dev/null | grep -q "ok installed" && \
-   ! dpkg-query -W -f='${Status}' "pkgconf" 2>/dev/null | grep -q "ok installed"; then
-    MISSING_PACKAGES+=("pkg-config")
-fi
-
 if [ ${#MISSING_PACKAGES[@]} -ne 0 ]; then
-    # 去重
-    UNIQUE_MISSING=($(echo "${MISSING_PACKAGES[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
-    echo "❌ 缺少必要的包: ${UNIQUE_MISSING[*]}"
+    echo "❌ 缺少必要的包: ${MISSING_PACKAGES[*]}"
     echo "请运行以下命令安装依赖:"
-    echo "sudo apt update && sudo apt install -y ${UNIQUE_MISSING[*]}"
+    echo "sudo apt update && sudo apt install -y ${MISSING_PACKAGES[*]}"
     exit 1
 fi
+# ==================================================
 
 # 编译设置
 CC="gcc"
@@ -97,21 +74,15 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
 # =============== 下载 ===============
-# 添加浏览器 User-Agent (-A) 避免被服务器防火墙拦截拦截返回 HTML
-CURL_OPTS="-# -L -f -A Mozilla/5.0"
-
 if [ ! -d "osip2" ]; then
   echo "📥 下载 libosip2-5.3.0..."
-  # 优先使用官方镜像，如遭遇404则自动降级到 GNU 镜像
-  $curl_cmd $CURL_OPTS "https://antisip.com" | tar -xzf - || \
-  $curl_cmd $CURL_OPTS "https://gnu.org" | tar -xzf -
+  curl -# -L "https://www.antisip.com/download/exosip2/libosip2-5.3.0.tar.gz" | tar -xzf -
   mv libosip2-5.3.0 osip2
 fi
 
 if [ ! -d "eXosip2" ]; then
   echo "📥 下载 libexosip2-5.3.0..."
-  $curl_cmd $CURL_OPTS "https://antisip.com" | tar -xzf - || \
-  $curl_cmd $CURL_OPTS "https://download.savannah.nongnu.org/releases/exosip/libexosip2-5.3.0.tar.gz" | tar -xzf -
+  curl -# -L "https://www.antisip.com/download/exosip2/libexosip2-5.3.0.tar.gz" | tar -xzf -
   mv libexosip2-5.3.0 eXosip2
 fi
 
@@ -160,5 +131,5 @@ cd ../..
 
 echo ""
 echo "✅ Ubuntu/Debian 编译成功!"
-echo "📂 输出目录: $OUTPUT_DIR"
+echo "📂 输出目录:$OUTPUT_DIR"
 ls -lh "$OUTPUT_DIR/lib/"lib*.a 2>/dev/null || echo "没有找到静态库文件"
