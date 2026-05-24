@@ -149,8 +149,9 @@ SipContext* sip_init(ServerInfo *info) {
             if (tcp_result == 0) fprintf(stderr, "[DEBUG] TCP server ready on %s:%d\n", use_ip ? use_ip : "0.0.0.0", info->port);
         }
         
-        if (udp_result != 0 && tcp_result != 0) {
-            fprintf(stderr, "[ERROR] Both UDP and TCP listen failed\n");
+        if (udp_result != 0 || tcp_result != 0) {
+            fprintf(stderr, "[ERROR] ALL mode listen failed on %s:%d (UDP=%d, TCP=%d)\n",
+                    use_ip ? use_ip : "0.0.0.0", info->port, udp_result, tcp_result);
             pthread_mutex_destroy(&ctx->lock);
             eXosip_quit(ctx->ctx);
             free(ctx);
@@ -4483,6 +4484,5 @@ int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len) {
     
     return 0;
 }
-
 
 

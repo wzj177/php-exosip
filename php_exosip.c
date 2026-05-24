@@ -1574,8 +1574,8 @@ PHP_METHOD(ExoSip, run) {
                                                   obj->ctx->server_info.ip,
                                                   obj->ctx->server_info.port,
                                                   AF_INET, 0);
-                if (udp_ret != 0 && tcp_ret != 0) {
-                    php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d (UDP=%d, TCP=%d)",
+                if (udp_ret != 0 || tcp_ret != 0) {
+                    php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d in ALL mode (UDP=%d, TCP=%d)",
                         obj->ctx->server_info.ip, obj->ctx->server_info.port, udp_ret, tcp_ret);
                     RETURN_FALSE;
                 }
@@ -1636,6 +1636,8 @@ PHP_METHOD(ExoSip, run) {
             
             php_printf("[Worker] eXosip listening on %s:%d (%s)\n",
                 obj->ctx->server_info.ip, obj->ctx->server_info.port, mode);
+            php_printf("[Worker] php-exosip version=%s build=%s %s\n",
+                PHP_EXOSIP_VERSION, __DATE__, __TIME__);
             
             // Save original signal handlers
             struct sigaction old_sigint, old_sigterm;
@@ -1651,6 +1653,9 @@ PHP_METHOD(ExoSip, run) {
             // Worker process: process SIP events
             obj->ctx->running = 1;
             obj->is_running = 1;
+            time_t last_loop_diag = 0;
+            unsigned long loop_count = 0;
+            unsigned long total_event_count = 0;
             
             php_exosip_register_instance(obj);
             
@@ -1675,6 +1680,8 @@ PHP_METHOD(ExoSip, run) {
             }
             
             while (obj->ctx->running && obj->is_running) {
+                loop_count++;
+                
                 // Get SIP events (non-blocking, 100ms timeout)
                 zval events_array;
                 int event_count = exosip_get_events_nonblocking(obj->ctx, &events_array, 100);
@@ -1682,6 +1689,16 @@ PHP_METHOD(ExoSip, run) {
                 if (event_count < 0) {
                     php_error_docref(NULL, E_WARNING, "[Worker] Failed to get SIP events");
                     break;
+                }
+                
+                total_event_count += (unsigned long)event_count;
+                if (obj->ctx->server_info.debug) {
+                    time_t now = time(NULL);
+                    if (now - last_loop_diag >= 10) {
+                        last_loop_diag = now;
+                        php_printf("[Worker] event loop alive: pid=%d mode=%s loops=%lu total_events=%lu last_events=%d\n",
+                            getpid(), mode, loop_count, total_event_count, event_count);
+                    }
                 }
                 
                 if (event_count > 0) {
@@ -4026,6 +4043,15 @@ PHP_MSHUTDOWN_FUNCTION(exosip) {
     return SUCCESS;
 }
 
+PHP_MINFO_FUNCTION(exosip) {
+    php_info_print_table_start();
+    php_info_print_table_header(2, "php-exosip support", "enabled");
+    php_info_print_table_row(2, "Version", PHP_EXOSIP_VERSION);
+    php_info_print_table_row(2, "Build date", __DATE__ " " __TIME__);
+    php_info_print_table_row(2, "Event extension detected", has_event_extension ? "yes" : "no");
+    php_info_print_table_end();
+}
+
 zend_module_entry exosip_module_entry = {
     STANDARD_MODULE_HEADER,
     "exosip",
@@ -4034,8 +4060,8 @@ zend_module_entry exosip_module_entry = {
     PHP_MSHUTDOWN(exosip),
     NULL,
     NULL,
-    NULL,
-    NO_VERSION_YET,
+    PHP_MINFO(exosip),
+    PHP_EXOSIP_VERSION,
     STANDARD_MODULE_PROPERTIES
 };
 
