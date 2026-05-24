@@ -1561,19 +1561,38 @@ PHP_METHOD(ExoSip, run) {
             eXosip_set_user_agent(exosip_ctx, obj->ctx->server_info.ua);
             
             // 监听端口
-            const char *mode = obj->ctx->server_info.mode;
-            int transport = IPPROTO_UDP;
-            if (strcmp(mode, "tcp") == 0) transport = IPPROTO_TCP;
-            else if (strcmp(mode, "tls") == 0) transport = IPPROTO_TCP; // TLS 需要额外配置
-            
-            int ret = eXosip_listen_addr(exosip_ctx, transport, 
-                                          obj->ctx->server_info.ip, 
-                                          obj->ctx->server_info.port, 
-                                          AF_INET, 0);
-            if (ret != 0) {
-                php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d",
-                    obj->ctx->server_info.ip, obj->ctx->server_info.port);
-                RETURN_FALSE;
+            const char *mode = obj->ctx->server_info.mode ? obj->ctx->server_info.mode : "udp";
+            int enable_reuse = 1;
+            eXosip_set_option(exosip_ctx, EXOSIP_OPT_ENABLE_REUSE_TCP_PORT, (void*)&enable_reuse);
+
+            if (strcasecmp(mode, "all") == 0) {
+                int udp_ret = eXosip_listen_addr(exosip_ctx, IPPROTO_UDP,
+                                                  obj->ctx->server_info.ip,
+                                                  obj->ctx->server_info.port,
+                                                  AF_INET, 0);
+                int tcp_ret = eXosip_listen_addr(exosip_ctx, IPPROTO_TCP,
+                                                  obj->ctx->server_info.ip,
+                                                  obj->ctx->server_info.port,
+                                                  AF_INET, 0);
+                if (udp_ret != 0 && tcp_ret != 0) {
+                    php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d (UDP=%d, TCP=%d)",
+                        obj->ctx->server_info.ip, obj->ctx->server_info.port, udp_ret, tcp_ret);
+                    RETURN_FALSE;
+                }
+            } else {
+                int transport = IPPROTO_UDP;
+                if (strcasecmp(mode, "tcp") == 0) transport = IPPROTO_TCP;
+                else if (strcasecmp(mode, "tls") == 0) transport = IPPROTO_TCP; // TLS 需要额外配置
+
+                int ret = eXosip_listen_addr(exosip_ctx, transport,
+                                              obj->ctx->server_info.ip,
+                                              obj->ctx->server_info.port,
+                                              AF_INET, 0);
+                if (ret != 0) {
+                    php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d (%s, error=%d)",
+                        obj->ctx->server_info.ip, obj->ctx->server_info.port, mode, ret);
+                    RETURN_FALSE;
+                }
             }
             
             // 关键修复: 设置公网IP用于 Contact 和 Via 头
