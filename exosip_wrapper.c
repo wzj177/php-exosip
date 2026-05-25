@@ -95,7 +95,7 @@ SipContext* sip_init(ServerInfo *info) {
         eXosip_set_user_agent(ctx->ctx, info->ua);
     }
     
-    // 启用TCP端口复用（关键：允许TCP/UDP同时监听同一端口）
+    // 启用TCP端口复用，降低进程重启后端口短暂占用的影响
     int enable_reuse = 1;
     eXosip_set_option(ctx->ctx, EXOSIP_OPT_ENABLE_REUSE_TCP_PORT, (void*)&enable_reuse);
     
@@ -118,9 +118,9 @@ SipContext* sip_init(ServerInfo *info) {
             return NULL;
         }
     } else if (strcasecmp(mode, "tcp") == 0) {
-        // TCP需要设置更长的超时
-        int tcp_timeout = 60;
-        eXosip_set_option(ctx->ctx, EXOSIP_OPT_UDP_KEEP_ALIVE, (void*)&tcp_timeout);
+        // eXosip2 5.3 uses this option as a shared UDP/TCP/TLS keepalive interval.
+        int keepalive_ms = 17000;
+        eXosip_set_option(ctx->ctx, EXOSIP_OPT_UDP_KEEP_ALIVE, (void*)&keepalive_ms);
         
         listen_result = eXosip_listen_addr(ctx->ctx, IPPROTO_TCP, use_ip, info->port, AF_INET, 0);
         if (debug) {
@@ -135,39 +135,12 @@ SipContext* sip_init(ServerInfo *info) {
             free(ctx);
             return NULL;
         }
-    } else if (strcasecmp(mode, "all") == 0) {
-        // 同时监听UDP和TCP，设置TCP超时
-        int tcp_timeout = 60;
-        eXosip_set_option(ctx->ctx, EXOSIP_OPT_UDP_KEEP_ALIVE, (void*)&tcp_timeout);
-        
-        int udp_result = eXosip_listen_addr(ctx->ctx, IPPROTO_UDP, use_ip, info->port, AF_INET, 0);
-        int tcp_result = eXosip_listen_addr(ctx->ctx, IPPROTO_TCP, use_ip, info->port, AF_INET, 0);
-        
-        if (debug) {
-            fprintf(stderr, "[DEBUG] UDP result: %d, TCP result: %d\n", udp_result, tcp_result);
-            if (udp_result == 0) fprintf(stderr, "[DEBUG] UDP server ready on %s:%d\n", use_ip ? use_ip : "0.0.0.0", info->port);
-            if (tcp_result == 0) fprintf(stderr, "[DEBUG] TCP server ready on %s:%d\n", use_ip ? use_ip : "0.0.0.0", info->port);
-        }
-        
-        if (udp_result != 0 || tcp_result != 0) {
-            fprintf(stderr, "[ERROR] ALL mode listen failed on %s:%d (UDP=%d, TCP=%d)\n",
-                    use_ip ? use_ip : "0.0.0.0", info->port, udp_result, tcp_result);
-            pthread_mutex_destroy(&ctx->lock);
-            eXosip_quit(ctx->ctx);
-            free(ctx);
-            return NULL;
-        }
     } else {
-        fprintf(stderr, "[WARNING] Unknown mode '%s', using UDP\n", mode);
-        listen_result = eXosip_listen_addr(ctx->ctx, IPPROTO_UDP, use_ip, info->port, AF_INET, 0);
-        if (listen_result != 0) {
-            fprintf(stderr, "[ERROR] UDP listen failed on %s:%d\n", 
-                    use_ip ? use_ip : "0.0.0.0", info->port);
-            pthread_mutex_destroy(&ctx->lock);
-            eXosip_quit(ctx->ctx);
-            free(ctx);
-            return NULL;
-        }
+        fprintf(stderr, "[ERROR] Unsupported transport mode '%s'. Use UDP or TCP.\n", mode);
+        pthread_mutex_destroy(&ctx->lock);
+        eXosip_quit(ctx->ctx);
+        free(ctx);
+        return NULL;
     }
     
     if (info->sipId && info->sipPass && info->sipRealm) {
@@ -712,6 +685,25 @@ int parse_sip_register(osip_message_t *sip_msg, char *device_id, char *contact_u
     return 0;
 }
 
+static const char *sip_context_transport(SipContext *ctx) {
+    if (ctx && ctx->server_info.mode && strcasecmp(ctx->server_info.mode, "tcp") == 0) {
+        return "tcp";
+    }
+    return "udp";
+}
+
+static void sip_build_device_uri(char *buffer, size_t buffer_len, const char *device_id, ConnectionInfo *conn) {
+    if (!buffer || buffer_len == 0 || !device_id || !conn) {
+        return;
+    }
+
+    if (strcasecmp(conn->transport, "tcp") == 0) {
+        snprintf(buffer, buffer_len, "sip:%s@%s:%d;transport=tcp", device_id, conn->ip, conn->port);
+    } else {
+        snprintf(buffer, buffer_len, "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    }
+}
+
 // ==================== 消息发送 ====================
 
 // ==================== 消息发送（已废弃，保留用于兼容性） ====================
@@ -854,9 +846,10 @@ int sip_send_catalog_query(SipContext *ctx, const char *device_id) {
         "</Query>\r\n",
         sn, device_id);
     
-    // 构造目标URI：使用实际来源IP（conn->ip），而不是Contact头的内网IP
+    // 构造目标URI：使用实际来源IP（conn->ip），而不是Contact头的内网IP。
+    // TCP模式必须显式追加 ;transport=tcp，避免主动MESSAGE按UDP发送。
     char to_uri[256];
-    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    sip_build_device_uri(to_uri, sizeof(to_uri), device_id, conn);
     
     int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
@@ -885,7 +878,7 @@ int sip_send_device_info_query(SipContext *ctx, const char *device_id) {
     
     // 构造目标URI：使用实际来源IP
     char to_uri[256];
-    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    sip_build_device_uri(to_uri, sizeof(to_uri), device_id, conn);
     
     int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
@@ -919,7 +912,7 @@ int sip_send_ptz_control(SipContext *ctx, const char *device_id, const char *cha
     
     // 构造目标URI：使用实际来源IP
     char to_uri[256];
-    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    sip_build_device_uri(to_uri, sizeof(to_uri), device_id, conn);
     
     int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
@@ -1571,6 +1564,7 @@ void connection_to_php_array(ConnectionInfo *conn, zval *arr) {
     add_assoc_string(arr, "ip", conn->ip);
     add_assoc_long(arr, "port", conn->port);
     add_assoc_string(arr, "contact_uri", conn->contact_uri);
+    add_assoc_string(arr, "transport", conn->transport[0] ? conn->transport : "udp");
     add_assoc_string(arr, "user_agent", conn->user_agent);
     add_assoc_long(arr, "state", conn->state);
     add_assoc_long(arr, "created_at", conn->created_at);
@@ -1738,14 +1732,20 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
     
     array_init(events_array);
 
-    eXosip_lock(ctx->ctx);
-    eXosip_automatic_action(ctx->ctx);
-    eXosip_unlock(ctx->ctx);
-
     int tv_sec = timeout_ms / 1000;
     int tv_ms = timeout_ms % 1000;
 
-    while ((evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms)) != NULL) {
+    while (1) {
+        evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms);
+
+        eXosip_lock(ctx->ctx);
+        eXosip_automatic_action(ctx->ctx);
+        eXosip_unlock(ctx->ctx);
+
+        if (!evt) {
+            break;
+        }
+
         // 详细的事件调试信息
         if (debug) {
             const char *event_type_name = "UNKNOWN";
@@ -1873,6 +1873,8 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
                     // 保存Contact URI（仅用于日志和调试）
                     strncpy(conn->contact_uri, contact_uri, sizeof(conn->contact_uri) - 1);
                     strncpy(conn->user_agent, user_agent, sizeof(conn->user_agent) - 1);
+                    strncpy(conn->transport, sip_context_transport(ctx), sizeof(conn->transport) - 1);
+                    conn->transport[sizeof(conn->transport) - 1] = '\0';
                     conn->last_seen = time(NULL);
                     conn->register_count++;
                     conn->state = CONN_STATE_REGISTERED;
@@ -1939,7 +1941,7 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
         eXosip_event_free(evt);
         
         tv_sec = 0;
-        tv_ms = 0;
+        tv_ms = 5;
     }
 
     return event_count;
@@ -3113,12 +3115,18 @@ int client_process_events(ClientContext *ctx, int timeout_ms, zval *events_array
     int tv_ms = timeout_ms % 1000;
     int count = 0;
     
-    eXosip_lock(ctx->ctx);
-    eXosip_automatic_action(ctx->ctx);
-    eXosip_unlock(ctx->ctx);
-    
     eXosip_event_t *evt;
-    while ((evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms)) != NULL) {
+    while (1) {
+        evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms);
+
+        eXosip_lock(ctx->ctx);
+        eXosip_automatic_action(ctx->ctx);
+        eXosip_unlock(ctx->ctx);
+
+        if (!evt) {
+            break;
+        }
+
         zval event_item;
         array_init(&event_item);
         
@@ -3149,7 +3157,7 @@ int client_process_events(ClientContext *ctx, int timeout_ms, zval *events_array
         count++;
         
         tv_sec = 0;
-        tv_ms = 0;
+        tv_ms = 5;
     }
     
     return count;
@@ -4484,5 +4492,3 @@ int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len) {
     
     return 0;
 }
-
-

@@ -75,7 +75,7 @@ sudo phpenmod exosip
 $sip = new ExoSip([
     'host' => '0.0.0.0',
     'port' => 5060,
-    'mode' => 'UDP',  // UDP|TCP|ALL
+    'mode' => 'UDP',  // UDP|TCP
 ]);
 
 // 处理 REGISTER
@@ -210,7 +210,7 @@ public function __construct(?array $config = null)
 **配置参数**：
 - `host` (string): 监听地址，默认 `0.0.0.0`
 - `port` (int): 监听端口，默认 `5060`
-- `mode` (string): 传输模式 `UDP|TCP|ALL`，默认 `UDP`
+- `mode` (string): 传输模式 `UDP|TCP`，默认 `UDP`
 - `sipId` (string): SIP 服务器 ID
 - `sipRealm` (string): SIP 认证域
 - `sipPass` (string): SIP 认证密码
@@ -250,7 +250,7 @@ public function run(): bool
 // 停止服务器
 public function stop(): bool
 
-// 非阻塞获取事件
+// 非阻塞获取事件（已废弃：服务端生产请使用 run()）
 public function processEvents(int $timeout = 0): array
 
 // 发送 SIP 消息

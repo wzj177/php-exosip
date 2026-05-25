@@ -1349,6 +1349,7 @@ PHP_METHOD(ExoSip, quit) {
 
 /* ========== ExoSip::processEvents() - 非阻塞获取事件 ========== */
 PHP_METHOD(ExoSip, processEvents) {
+    static int deprecated_warned = 0;
     zend_long timeout_ms = 0;  // 修复：使用zend_long而不是long
     
     ZEND_PARSE_PARAMETERS_START(0,1)
@@ -1360,6 +1361,11 @@ PHP_METHOD(ExoSip, processEvents) {
     if (!obj->ctx) {
         php_error_docref(NULL, E_WARNING, "eXosip not initialized");
         RETURN_FALSE;
+    }
+
+    if (!deprecated_warned) {
+        deprecated_warned = 1;
+        php_error_docref(NULL, E_DEPRECATED, "ExoSip::processEvents() is deprecated for server production use; use ExoSip::run() instead.");
     }
 
     // 使用新的非阻塞API获取事件
@@ -1565,34 +1571,26 @@ PHP_METHOD(ExoSip, run) {
             int enable_reuse = 1;
             eXosip_set_option(exosip_ctx, EXOSIP_OPT_ENABLE_REUSE_TCP_PORT, (void*)&enable_reuse);
 
-            if (strcasecmp(mode, "all") == 0) {
-                int udp_ret = eXosip_listen_addr(exosip_ctx, IPPROTO_UDP,
-                                                  obj->ctx->server_info.ip,
-                                                  obj->ctx->server_info.port,
-                                                  AF_INET, 0);
-                int tcp_ret = eXosip_listen_addr(exosip_ctx, IPPROTO_TCP,
-                                                  obj->ctx->server_info.ip,
-                                                  obj->ctx->server_info.port,
-                                                  AF_INET, 0);
-                if (udp_ret != 0 || tcp_ret != 0) {
-                    php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d in ALL mode (UDP=%d, TCP=%d)",
-                        obj->ctx->server_info.ip, obj->ctx->server_info.port, udp_ret, tcp_ret);
-                    RETURN_FALSE;
-                }
+            int transport = IPPROTO_UDP;
+            if (strcasecmp(mode, "udp") == 0) {
+                transport = IPPROTO_UDP;
+            } else if (strcasecmp(mode, "tcp") == 0) {
+                transport = IPPROTO_TCP;
+            } else if (strcasecmp(mode, "tls") == 0) {
+                transport = IPPROTO_TCP; // TLS 需要额外配置
             } else {
-                int transport = IPPROTO_UDP;
-                if (strcasecmp(mode, "tcp") == 0) transport = IPPROTO_TCP;
-                else if (strcasecmp(mode, "tls") == 0) transport = IPPROTO_TCP; // TLS 需要额外配置
+                php_error_docref(NULL, E_ERROR, "[Worker] Unsupported transport mode '%s'. Use UDP or TCP.", mode);
+                RETURN_FALSE;
+            }
 
-                int ret = eXosip_listen_addr(exosip_ctx, transport,
-                                              obj->ctx->server_info.ip,
-                                              obj->ctx->server_info.port,
-                                              AF_INET, 0);
-                if (ret != 0) {
-                    php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d (%s, error=%d)",
-                        obj->ctx->server_info.ip, obj->ctx->server_info.port, mode, ret);
-                    RETURN_FALSE;
-                }
+            int ret = eXosip_listen_addr(exosip_ctx, transport,
+                                          obj->ctx->server_info.ip,
+                                          obj->ctx->server_info.port,
+                                          AF_INET, 0);
+            if (ret != 0) {
+                php_error_docref(NULL, E_ERROR, "[Worker] eXosip_listen_addr() failed on %s:%d (%s, error=%d)",
+                    obj->ctx->server_info.ip, obj->ctx->server_info.port, mode, ret);
+                RETURN_FALSE;
             }
             
             // 关键修复: 设置公网IP用于 Contact 和 Via 头
@@ -1653,9 +1651,6 @@ PHP_METHOD(ExoSip, run) {
             // Worker process: process SIP events
             obj->ctx->running = 1;
             obj->is_running = 1;
-            time_t last_loop_diag = 0;
-            unsigned long loop_count = 0;
-            unsigned long total_event_count = 0;
             
             php_exosip_register_instance(obj);
             
@@ -1680,8 +1675,6 @@ PHP_METHOD(ExoSip, run) {
             }
             
             while (obj->ctx->running && obj->is_running) {
-                loop_count++;
-                
                 // Get SIP events (non-blocking, 100ms timeout)
                 zval events_array;
                 int event_count = exosip_get_events_nonblocking(obj->ctx, &events_array, 100);
@@ -1689,16 +1682,6 @@ PHP_METHOD(ExoSip, run) {
                 if (event_count < 0) {
                     php_error_docref(NULL, E_WARNING, "[Worker] Failed to get SIP events");
                     break;
-                }
-                
-                total_event_count += (unsigned long)event_count;
-                if (obj->ctx->server_info.debug) {
-                    time_t now = time(NULL);
-                    if (now - last_loop_diag >= 10) {
-                        last_loop_diag = now;
-                        php_printf("[Worker] event loop alive: pid=%d mode=%s loops=%lu total_events=%lu last_events=%d\n",
-                            getpid(), mode, loop_count, total_event_count, event_count);
-                    }
                 }
                 
                 if (event_count > 0) {

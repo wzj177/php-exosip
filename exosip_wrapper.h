@@ -131,6 +131,7 @@ typedef struct _connection_info {
     int message_count;        // 消息计数
     char user_agent[256];     // User-Agent
     char contact_uri[256];    // Contact URI
+    char transport[8];        // 传输协议: "udp" or "tcp"
     void *user_data;          // 用户自定义数据
 } ConnectionInfo;
 
