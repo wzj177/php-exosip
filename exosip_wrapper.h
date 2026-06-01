@@ -131,6 +131,7 @@ typedef struct _connection_info {
     int message_count;        // 消息计数
     char user_agent[256];     // User-Agent
     char contact_uri[256];    // Contact URI
+    char transport[8];        // 传输协议: "udp" or "tcp"
     void *user_data;          // 用户自定义数据
 } ConnectionInfo;
 
@@ -389,6 +390,26 @@ int sip_send_bye(SipContext *ctx, int call_id, int dialog_id);
 int sip_send_ack(SipContext *ctx, int dialog_id);
 int sip_send_message(SipContext *ctx, const char *target_uri, const char *content_type, const char *body);
 
+/**
+ * 发送 INFO 请求 (用于回放控制等会话内信令)
+ * 
+ * GB28181 回放控制需要在已建立的 INVITE 会话内发送 INFO 请求
+ * Content-Type 通常为 "Application/MANSRTSP"，body 使用 RTSP 格式命令
+ * 
+ * MANSRTSP 命令格式示例:
+ *   暂停:   PAUSE RTSP/1.0\r\nCSeq: 1\r\nPauseTime: now\r\n
+ *   恢复:   PLAY RTSP/1.0\r\nCSeq: 2\r\nRange: npt=now-\r\n
+ *   拖动:   PLAY RTSP/1.0\r\nCSeq: 3\r\nRange: npt=300-\r\n
+ *   倍速:   PLAY RTSP/1.0\r\nCSeq: 4\r\nScale: 2.0\r\n
+ * 
+ * @param ctx SIP 上下文
+ * @param dialog_id 对话 ID (由 INVITE 建立的会话)
+ * @param body 消息体 (MANSRTSP 命令)
+ * @param content_type 内容类型 (通常为 "Application/MANSRTSP")
+ * @return 0 成功, -1 失败
+ */
+int sip_send_info(SipContext *ctx, int dialog_id, const char *body, const char *content_type);
+
 // GB28181专用功能
 int sip_send_catalog_query(SipContext *ctx, const char *device_id);
 int sip_send_device_info_query(SipContext *ctx, const char *device_id);
@@ -437,6 +458,21 @@ int sip_cancel_subscribe(SipContext *ctx, int subscription_id);
  * @return 0 成功, -1 失败
  */
 int sip_send_notify_response(SipContext *ctx, int tid, int code);
+
+/**
+ * 发送 NOTIFY 请求（作为事件源主动通知订阅者）
+ * 用于 GB28181 目录/报警/移动位置 等事件通知
+ * 
+ * @param ctx SIP 上下文
+ * @param dialog_id 订阅对话 ID（收到 SUBSCRIBE 请求时获得）
+ * @param subscription_state 订阅状态: "active", "pending", "terminated"
+ * @param reason 终止原因（仅当 state 为 terminated 时有效）: 
+ *               "deactivated", "probation", "rejected", "timeout", "giveup", "noresource"
+ * @param xml_body NOTIFY 消息体（XML 格式）
+ * @return 0 成功, -1 失败
+ */
+int sip_send_notify(SipContext *ctx, int dialog_id, const char *subscription_state, 
+                   const char *reason, const char *xml_body);
 
 /**
  * 获取订阅信息
@@ -557,9 +593,10 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array);
 // ==================== 发送API ====================
 int exosip_send_message_with_content_type(SipContext *ctx, const char *to, const char *message, const char *content_type);
 int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *headers);
+int exosip_send_call_answer_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *body, const char *content_type);
 zval* exosip_create_event_object(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session);
 zval* exosip_create_session_object(SessionInfo *session);
-void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array);
+void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array, int debug);
 void exosip_create_session_object_array(SessionInfo *session, zval *session_array);
 
 // ============ 客户端API ============

@@ -95,7 +95,7 @@ SipContext* sip_init(ServerInfo *info) {
         eXosip_set_user_agent(ctx->ctx, info->ua);
     }
     
-    // 启用TCP端口复用（关键：允许TCP/UDP同时监听同一端口）
+    // 启用TCP端口复用，降低进程重启后端口短暂占用的影响
     int enable_reuse = 1;
     eXosip_set_option(ctx->ctx, EXOSIP_OPT_ENABLE_REUSE_TCP_PORT, (void*)&enable_reuse);
     
@@ -118,9 +118,9 @@ SipContext* sip_init(ServerInfo *info) {
             return NULL;
         }
     } else if (strcasecmp(mode, "tcp") == 0) {
-        // TCP需要设置更长的超时
-        int tcp_timeout = 60;
-        eXosip_set_option(ctx->ctx, EXOSIP_OPT_UDP_KEEP_ALIVE, (void*)&tcp_timeout);
+        // eXosip2 5.3 uses this option as a shared UDP/TCP/TLS keepalive interval.
+        int keepalive_ms = 17000;
+        eXosip_set_option(ctx->ctx, EXOSIP_OPT_UDP_KEEP_ALIVE, (void*)&keepalive_ms);
         
         listen_result = eXosip_listen_addr(ctx->ctx, IPPROTO_TCP, use_ip, info->port, AF_INET, 0);
         if (debug) {
@@ -135,38 +135,12 @@ SipContext* sip_init(ServerInfo *info) {
             free(ctx);
             return NULL;
         }
-    } else if (strcasecmp(mode, "all") == 0) {
-        // 同时监听UDP和TCP，设置TCP超时
-        int tcp_timeout = 60;
-        eXosip_set_option(ctx->ctx, EXOSIP_OPT_UDP_KEEP_ALIVE, (void*)&tcp_timeout);
-        
-        int udp_result = eXosip_listen_addr(ctx->ctx, IPPROTO_UDP, use_ip, info->port, AF_INET, 0);
-        int tcp_result = eXosip_listen_addr(ctx->ctx, IPPROTO_TCP, use_ip, info->port, AF_INET, 0);
-        
-        if (debug) {
-            fprintf(stderr, "[DEBUG] UDP result: %d, TCP result: %d\n", udp_result, tcp_result);
-            if (udp_result == 0) fprintf(stderr, "[DEBUG] UDP server ready on %s:%d\n", use_ip ? use_ip : "0.0.0.0", info->port);
-            if (tcp_result == 0) fprintf(stderr, "[DEBUG] TCP server ready on %s:%d\n", use_ip ? use_ip : "0.0.0.0", info->port);
-        }
-        
-        if (udp_result != 0 && tcp_result != 0) {
-            fprintf(stderr, "[ERROR] Both UDP and TCP listen failed\n");
-            pthread_mutex_destroy(&ctx->lock);
-            eXosip_quit(ctx->ctx);
-            free(ctx);
-            return NULL;
-        }
     } else {
-        fprintf(stderr, "[WARNING] Unknown mode '%s', using UDP\n", mode);
-        listen_result = eXosip_listen_addr(ctx->ctx, IPPROTO_UDP, use_ip, info->port, AF_INET, 0);
-        if (listen_result != 0) {
-            fprintf(stderr, "[ERROR] UDP listen failed on %s:%d\n", 
-                    use_ip ? use_ip : "0.0.0.0", info->port);
-            pthread_mutex_destroy(&ctx->lock);
-            eXosip_quit(ctx->ctx);
-            free(ctx);
-            return NULL;
-        }
+        fprintf(stderr, "[ERROR] Unsupported transport mode '%s'. Use UDP or TCP.\n", mode);
+        pthread_mutex_destroy(&ctx->lock);
+        eXosip_quit(ctx->ctx);
+        free(ctx);
+        return NULL;
     }
     
     if (info->sipId && info->sipPass && info->sipRealm) {
@@ -711,6 +685,25 @@ int parse_sip_register(osip_message_t *sip_msg, char *device_id, char *contact_u
     return 0;
 }
 
+static const char *sip_context_transport(SipContext *ctx) {
+    if (ctx && ctx->server_info.mode && strcasecmp(ctx->server_info.mode, "tcp") == 0) {
+        return "tcp";
+    }
+    return "udp";
+}
+
+static void sip_build_device_uri(char *buffer, size_t buffer_len, const char *device_id, ConnectionInfo *conn) {
+    if (!buffer || buffer_len == 0 || !device_id || !conn) {
+        return;
+    }
+
+    if (strcasecmp(conn->transport, "tcp") == 0) {
+        snprintf(buffer, buffer_len, "sip:%s@%s:%d;transport=tcp", device_id, conn->ip, conn->port);
+    } else {
+        snprintf(buffer, buffer_len, "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    }
+}
+
 // ==================== 消息发送 ====================
 
 // ==================== 消息发送（已废弃，保留用于兼容性） ====================
@@ -758,6 +751,80 @@ int sip_send_message(SipContext *ctx, const char *target_uri, const char *conten
     return exosip_send_message_with_content_type(ctx, target_uri, body, content_type);
 }
 
+/**
+ * 发送 INFO 请求 (用于回放控制等会话内信令)
+ * 
+ * GB28181 回放控制使用 SIP INFO 消息在已建立的 INVITE 会话内发送控制命令
+ * 这与使用 MESSAGE 方法发送的带外消息不同,INFO 必须在活动会话内发送
+ * 
+ * @param ctx SIP 上下文
+ * @param dialog_id 对话 ID (由 sendInvite 返回的 call_id 建立的会话)
+ * @param body 消息体 (MANSRTSP 命令,如 "PAUSE RTSP/1.0\r\nCSeq: 1\r\n...")
+ * @param content_type 内容类型 (通常为 "Application/MANSRTSP")
+ * @return 0 成功, -1 失败
+ */
+int sip_send_info(SipContext *ctx, int dialog_id, const char *body, const char *content_type) {
+    if (!ctx || dialog_id < 0) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    if (debug) {
+        fprintf(stderr, "[DEBUG] ========== INFO REQUEST ==========\n");
+        fprintf(stderr, "[DEBUG] Dialog ID: %d\n", dialog_id);
+        fprintf(stderr, "[DEBUG] Content-Type: %s\n", content_type ? content_type : "Application/MANSRTSP");
+        if (body) {
+            fprintf(stderr, "[DEBUG] Body:\n%s\n", body);
+        }
+        fprintf(stderr, "[DEBUG] ===================================\n");
+    }
+    
+    osip_message_t *info = NULL;
+    eXosip_lock(ctx->ctx);
+    
+    // 在已建立的对话中构建 INFO 请求
+    int ret = eXosip_call_build_info(ctx->ctx, dialog_id, &info);
+    
+    if (ret < 0 || !info) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build INFO: ret=%d, dialog_id=%d\n", ret, dialog_id);
+        eXosip_unlock(ctx->ctx);
+        return -1;
+    }
+    
+    // 设置消息体和 Content-Type
+    const char *ct = content_type ? content_type : "Application/MANSRTSP";
+    if (body && strlen(body) > 0) {
+        osip_message_set_body(info, body, strlen(body));
+        osip_message_set_content_type(info, ct);
+    }
+    
+    // 打印完整的 INFO 消息（调试用）
+    if (debug) {
+        char *msg_str = NULL;
+        size_t msg_len = 0;
+        osip_message_to_str(info, &msg_str, &msg_len);
+        if (msg_str) {
+            fprintf(stderr, "[DEBUG] Complete SIP INFO message:\n%s\n", msg_str);
+            osip_free(msg_str);
+        }
+    }
+    
+    // 发送 INFO 请求
+    ret = eXosip_call_send_request(ctx->ctx, dialog_id, info);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret < 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send INFO: ret=%d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ INFO sent successfully\n");
+    
+    return 0;
+}
+
 // ==================== GB28181专用功能 ====================
 
 int sip_send_catalog_query(SipContext *ctx, const char *device_id) {
@@ -779,9 +846,10 @@ int sip_send_catalog_query(SipContext *ctx, const char *device_id) {
         "</Query>\r\n",
         sn, device_id);
     
-    // 构造目标URI：使用实际来源IP（conn->ip），而不是Contact头的内网IP
+    // 构造目标URI：使用实际来源IP（conn->ip），而不是Contact头的内网IP。
+    // TCP模式必须显式追加 ;transport=tcp，避免主动MESSAGE按UDP发送。
     char to_uri[256];
-    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    sip_build_device_uri(to_uri, sizeof(to_uri), device_id, conn);
     
     int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
@@ -810,7 +878,7 @@ int sip_send_device_info_query(SipContext *ctx, const char *device_id) {
     
     // 构造目标URI：使用实际来源IP
     char to_uri[256];
-    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    sip_build_device_uri(to_uri, sizeof(to_uri), device_id, conn);
     
     int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
@@ -844,7 +912,7 @@ int sip_send_ptz_control(SipContext *ctx, const char *device_id, const char *cha
     
     // 构造目标URI：使用实际来源IP
     char to_uri[256];
-    snprintf(to_uri, sizeof(to_uri), "sip:%s@%s:%d", device_id, conn->ip, conn->port);
+    sip_build_device_uri(to_uri, sizeof(to_uri), device_id, conn);
     
     int ret = sip_send_message(ctx, to_uri, "Application/MANSCDP+xml", xml_body);
     
@@ -899,15 +967,16 @@ int sip_send_invite(SipContext *ctx, const char *to_uri, const char *sdp, const 
     eXosip_lock(ctx->ctx);
     
     // 构建 INVITE 请求
-    int call_id = eXosip_call_build_initial_invite(ctx->ctx, &invite, to_uri, from_uri, NULL, NULL);
+    // 注意: eXosip_call_build_initial_invite 返回状态码 (0=成功), 不是 call_id!
+    int build_result = eXosip_call_build_initial_invite(ctx->ctx, &invite, to_uri, from_uri, NULL, NULL);
     
-    if (call_id < 0 || !invite) {
-        if (debug) fprintf(stderr, "[ERROR] Failed to build INVITE: call_id=%d\n", call_id);
+    if (build_result < 0 || !invite) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build INVITE: result=%d\n", build_result);
         eXosip_unlock(ctx->ctx);
         return -1;
     }
     
-    if (debug) fprintf(stderr, "[DEBUG] INVITE message built: call_id=%d\n", call_id);
+    if (debug) fprintf(stderr, "[DEBUG] INVITE message built successfully\n");
     
     // 添加 SDP body
     if (sdp && strlen(sdp) > 0) {
@@ -935,18 +1004,21 @@ int sip_send_invite(SipContext *ctx, const char *to_uri, const char *sdp, const 
     }
     
     // 发送 INVITE
-    int ret = eXosip_call_send_initial_invite(ctx->ctx, invite);
+    // 注意: eXosip_call_send_initial_invite 返回的是 call_id (>0 成功), 不是 transaction_id
+    int actual_call_id = eXosip_call_send_initial_invite(ctx->ctx, invite);
     
     eXosip_unlock(ctx->ctx);
     
-    if (ret < 0) {
-        if (debug) fprintf(stderr, "[ERROR] Failed to send INVITE: eXosip_call_send_initial_invite returned %d\n", ret);
+    if (actual_call_id < 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send INVITE: eXosip_call_send_initial_invite returned %d\n", actual_call_id);
         return -1;
     }
     
-    if (debug) fprintf(stderr, "[DEBUG] ✓ INVITE sent successfully: call_id=%d, transaction_id=%d\n", call_id, ret);
+    if (debug) fprintf(stderr, "[DEBUG] ✓ INVITE sent successfully: call_id=%d\n", actual_call_id);
     
-    return call_id;
+    // 返回 actual_call_id (由 eXosip_call_send_initial_invite 返回)
+    // 注意: eXosip_call_build_initial_invite 返回的是状态码 (0=成功), 不是 call_id!
+    return actual_call_id;
 }
 
 /**
@@ -1188,6 +1260,107 @@ int sip_send_notify_response(SipContext *ctx, int tid, int code) {
     return 0;
 }
 
+/**
+ * 发送 NOTIFY 请求（作为事件源主动通知订阅者）
+ * 用于 GB28181 目录/报警/移动位置 等事件通知
+ * 
+ * @param ctx SIP 上下文
+ * @param dialog_id 订阅对话 ID（收到 SUBSCRIBE 请求后由 PHP 层保存）
+ * @param subscription_state 订阅状态: "active", "pending", "terminated"
+ * @param reason 终止原因（仅当 state 为 terminated 时有效）: 
+ *               "deactivated", "probation", "rejected", "timeout", "giveup", "noresource"
+ * @param xml_body NOTIFY 消息体（XML 格式）
+ * @return 0 成功, -1 失败
+ */
+int sip_send_notify(SipContext *ctx, int dialog_id, const char *subscription_state, 
+                   const char *reason, const char *xml_body) {
+    if (!ctx || dialog_id <= 0) {
+        return -1;
+    }
+    
+    int debug = ctx->server_info.debug;
+    
+    if (debug) {
+        fprintf(stderr, "[DEBUG] Sending NOTIFY: dialog_id=%d, state=%s, reason=%s\n", 
+                dialog_id, subscription_state ? subscription_state : "(null)",
+                reason ? reason : "(null)");
+    }
+    
+    // 解析订阅状态
+    int sub_status = EXOSIP_SUBCRSTATE_ACTIVE;  // 默认 active
+    int sub_reason = NORESOURCE;  // 默认 noresource
+    
+    if (subscription_state) {
+        if (strcasecmp(subscription_state, "pending") == 0) {
+            sub_status = EXOSIP_SUBCRSTATE_PENDING;
+        } else if (strcasecmp(subscription_state, "active") == 0) {
+            sub_status = EXOSIP_SUBCRSTATE_ACTIVE;
+        } else if (strcasecmp(subscription_state, "terminated") == 0) {
+            sub_status = EXOSIP_SUBCRSTATE_TERMINATED;
+        }
+    }
+    
+    // 解析终止原因
+    if (reason && sub_status == EXOSIP_SUBCRSTATE_TERMINATED) {
+        if (strcasecmp(reason, "deactivated") == 0) {
+            sub_reason = DEACTIVATED;
+        } else if (strcasecmp(reason, "probation") == 0) {
+            sub_reason = PROBATION;
+        } else if (strcasecmp(reason, "rejected") == 0) {
+            sub_reason = REJECTED;
+        } else if (strcasecmp(reason, "timeout") == 0) {
+            sub_reason = TIMEOUT;
+        } else if (strcasecmp(reason, "giveup") == 0) {
+            sub_reason = GIVEUP;
+        } else if (strcasecmp(reason, "noresource") == 0) {
+            sub_reason = NORESOURCE;
+        }
+    }
+    
+    osip_message_t *notify = NULL;
+    eXosip_lock(ctx->ctx);
+    
+    // 构建 NOTIFY 请求
+    int ret = eXosip_insubscription_build_notify(
+        ctx->ctx,
+        dialog_id,
+        sub_status,
+        sub_reason,
+        &notify
+    );
+    
+    if (ret != 0 || !notify) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to build NOTIFY: ret=%d, dialog_id=%d\n", ret, dialog_id);
+        eXosip_unlock(ctx->ctx);
+        return -1;
+    }
+    
+    // 设置 Content-Type 和消息体
+    if (xml_body && strlen(xml_body) > 0) {
+        osip_message_set_content_type(notify, "Application/MANSCDP+xml");
+        osip_message_set_body(notify, xml_body, strlen(xml_body));
+        
+        if (debug) {
+            fprintf(stderr, "[DEBUG] NOTIFY body (%zu bytes):\n%s\n", strlen(xml_body), xml_body);
+        }
+    }
+    
+    // 发送 NOTIFY
+    ret = eXosip_insubscription_send_request(ctx->ctx, dialog_id, notify);
+    
+    eXosip_unlock(ctx->ctx);
+    
+    if (ret != 0) {
+        if (debug) fprintf(stderr, "[ERROR] Failed to send NOTIFY: ret=%d\n", ret);
+        return -1;
+    }
+    
+    if (debug) fprintf(stderr, "[DEBUG] ✓ NOTIFY sent successfully: dialog_id=%d, state=%s\n", 
+                       dialog_id, subscription_state);
+    
+    return 0;
+}
+
 // ==================== 废弃函数：订阅查询和管理已移至 PHP 层 ====================
 // 以下函数已被 SubscriptionManager（PHP + Redis）替代
 // 原因：
@@ -1391,6 +1564,7 @@ void connection_to_php_array(ConnectionInfo *conn, zval *arr) {
     add_assoc_string(arr, "ip", conn->ip);
     add_assoc_long(arr, "port", conn->port);
     add_assoc_string(arr, "contact_uri", conn->contact_uri);
+    add_assoc_string(arr, "transport", conn->transport[0] ? conn->transport : "udp");
     add_assoc_string(arr, "user_agent", conn->user_agent);
     add_assoc_long(arr, "state", conn->state);
     add_assoc_long(arr, "created_at", conn->created_at);
@@ -1558,14 +1732,20 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
     
     array_init(events_array);
 
-    eXosip_lock(ctx->ctx);
-    eXosip_automatic_action(ctx->ctx);
-    eXosip_unlock(ctx->ctx);
-
     int tv_sec = timeout_ms / 1000;
     int tv_ms = timeout_ms % 1000;
 
-    while ((evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms)) != NULL) {
+    while (1) {
+        evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms);
+
+        eXosip_lock(ctx->ctx);
+        eXosip_automatic_action(ctx->ctx);
+        eXosip_unlock(ctx->ctx);
+
+        if (!evt) {
+            break;
+        }
+
         // 详细的事件调试信息
         if (debug) {
             const char *event_type_name = "UNKNOWN";
@@ -1693,6 +1873,8 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
                     // 保存Contact URI（仅用于日志和调试）
                     strncpy(conn->contact_uri, contact_uri, sizeof(conn->contact_uri) - 1);
                     strncpy(conn->user_agent, user_agent, sizeof(conn->user_agent) - 1);
+                    strncpy(conn->transport, sip_context_transport(ctx), sizeof(conn->transport) - 1);
+                    conn->transport[sizeof(conn->transport) - 1] = '\0';
                     conn->last_seen = time(NULL);
                     conn->register_count++;
                     conn->state = CONN_STATE_REGISTERED;
@@ -1750,7 +1932,7 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
 
         // 创建事件对象
         zval event_obj;
-        exosip_create_event_object_array(evt, conn, session, &event_obj);
+        exosip_create_event_object_array(evt, conn, session, &event_obj, debug);
         
         // 添加到事件数组
         add_next_index_zval(events_array, &event_obj);
@@ -1759,7 +1941,7 @@ int exosip_get_events_nonblocking(SipContext *ctx, zval *events_array, int timeo
         eXosip_event_free(evt);
         
         tv_sec = 0;
-        tv_ms = 0;
+        tv_ms = 5;
     }
 
     return event_count;
@@ -1907,7 +2089,7 @@ int exosip_send_message_with_content_type(SipContext *ctx, const char *to, const
     if (debug) fprintf(stderr, "[DEBUG] ✓ MESSAGE sent successfully, transaction ID: %d\n", send_ret);
     
     eXosip_unlock(ctx->ctx);
-    return 0;
+    return send_ret;  // 返回 transaction_id 用于请求-响应关联
 }
 
 /**
@@ -1982,13 +2164,78 @@ int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char 
 }
 
 /**
+ * 发送 INVITE 响应 (200 OK 带 SDP body)
+ *
+ * 用于回复收到的 INVITE 请求（如设备发起的广播 INVITE）。
+ * 与 exosip_send_response_wrapper 的区别：
+ * - send_response_wrapper 使用 eXosip_message_* API (处理 MESSAGE/REGISTER 等)
+ * - send_call_answer_wrapper 使用 eXosip_call_* API (处理 INVITE)
+ *
+ * @param ctx SIP 上下文
+ * @param tid Transaction ID (来自 SipEvent::getTid())
+ * @param code SIP 响应码 (通常是 200)
+ * @param reason 原因短语 (可选，如 "OK")
+ * @param body SDP body (可选，200 OK 时需要)
+ * @param content_type Content-Type (可选，默认 "application/sdp")
+ * @return 0 成功, -1 失败
+ */
+int exosip_send_call_answer_wrapper(SipContext *ctx, int tid, int code, const char *reason, const char *body, const char *content_type) {
+    if (!ctx || !ctx->ctx || tid <= 0) {
+        return -1;
+    }
+
+    int debug = ctx->server_info.debug;
+    osip_message_t *answer = NULL;
+
+    eXosip_lock(ctx->ctx);
+
+    int ret = eXosip_call_build_answer(ctx->ctx, tid, code, &answer);
+    if (ret != 0 || !answer) {
+        eXosip_unlock(ctx->ctx);
+        if (debug) fprintf(stderr, "[ERROR] Failed to build CALL answer: ret=%d, tid=%d, code=%d\n", ret, tid, code);
+        return -1;
+    }
+
+    // 设置 body (SDP)
+    if (body && strlen(body) > 0) {
+        const char *ct = content_type ? content_type : "application/sdp";
+        osip_message_set_body(answer, body, strlen(body));
+        osip_message_set_content_type(answer, ct);
+    }
+
+    // 设置 reason phrase
+    if (reason && strlen(reason) > 0 && answer->reason_phrase) {
+        osip_free(answer->reason_phrase);
+        answer->reason_phrase = osip_strdup(reason);
+    }
+
+    // 调试：打印完整的响应消息
+    if (debug) {
+        char *msg_str = NULL;
+        size_t msg_len = 0;
+        if (osip_message_to_str(answer, &msg_str, &msg_len) == 0 && msg_str) {
+            fprintf(stderr, "[DEBUG] Sending CALL Answer (tid=%d, code=%d):\n%s\n", tid, code, msg_str);
+            osip_free(msg_str);
+        }
+    }
+
+    int send_ret = eXosip_call_send_answer(ctx->ctx, tid, code, answer);
+
+    eXosip_unlock(ctx->ctx);
+
+    if (debug) fprintf(stderr, "[DEBUG] Send CALL answer %d result: %d (tid=%d)\n", code, send_ret, tid);
+
+    return send_ret == 0 ? 0 : -1;
+}
+
+/**
  * 创建SipEvent对象的PHP数组表示
  * @param evt eXosip事件
  * @param conn 连接信息
  * @param session 会话信息
  * @param event_array PHP数组
  */
-void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array) {
+void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionInfo *session, zval *event_array, int debug) {
     array_init(event_array);
     
     // 基本事件信息
@@ -2059,40 +2306,58 @@ void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn,
         }
     }
 
-    // 消息体和Content-Type（参考标准GB28181实现）
+    // 消息体和Content-Type
     const char *body = NULL;
     const char *content_type = NULL;
-    
-    // 优先从响应中提取body（对于200 OK等响应事件）
-    // 如果没有响应，则从请求中提取（对于INVITE等请求事件）
-    osip_message_t *body_msg = evt->response ? evt->response : evt->request;
-    fprintf(stderr, "[C-DEBUG] body_msg source: %s (evt->type=%d)\n", 
-            evt->response ? "response" : (evt->request ? "request" : "NULL"), evt->type);
-    
+
+    // 根据事件类型决定从 request 还是 response 中提取 body：
+    // - 收到请求的事件 (CALL_INVITE, MESSAGE_NEW 等): body 在 evt->request
+    //   (evt->response 可能是自动生成的 100 Trying，没有 body)
+    // - 收到响应的事件 (CALL_ANSWERED, MESSAGE_ANSWERED 等): body 在 evt->response
+    int is_request_event = (evt->type == EXOSIP_CALL_INVITE ||
+                            evt->type == EXOSIP_CALL_REINVITE ||
+                            evt->type == EXOSIP_CALL_ACK ||
+                            evt->type == EXOSIP_CALL_CANCELLED ||
+                            evt->type == EXOSIP_MESSAGE_NEW);
+
+    osip_message_t *body_msg = is_request_event
+        ? (evt->request ? evt->request : evt->response)
+        : (evt->response ? evt->response : evt->request);
+
+    if (debug) {
+        fprintf(stderr, "[C-DEBUG] evt->type=%d, is_request_event=%d, body_msg source: %s\n",
+                evt->type, is_request_event,
+                (body_msg == evt->request) ? "request" : (body_msg == evt->response ? "response" : "NULL"));
+    }
+
     if (body_msg) {
         // 使用标准osip API获取body
         osip_body_t *osip_body = NULL;
         int ret = osip_message_get_body(body_msg, 0, &osip_body);
-        fprintf(stderr, "[C-DEBUG] osip_message_get_body returned: %d\n", ret);
-        
+        if (debug) fprintf(stderr, "[C-DEBUG] osip_message_get_body returned: %d, osip_body=%p\n", ret, (void*)osip_body);
+
         if (ret == 0 && osip_body && osip_body->body) {
             body = osip_body->body;
-            fprintf(stderr, "[C-DEBUG] Body extracted: %.50s... (length=%zu)\n", 
-                    body, strlen(body));
+            if (debug) {
+                fprintf(stderr, "[C-DEBUG] Body extracted (length=%zu):\n%s\n",
+                        strlen(body), body);
+            }
         } else {
-            fprintf(stderr, "[C-DEBUG] No body found (ret=%d, osip_body=%p)\n", 
-                    ret, (void*)osip_body);
+            if (debug) {
+                fprintf(stderr, "[C-DEBUG] No body found (ret=%d, osip_body=%p)\n",
+                        ret, (void*)osip_body);
+            }
         }
-        
+
         // 获取Content-Type
         osip_content_type_t *ct = osip_message_get_content_type(body_msg);
         if (ct && ct->type && ct->subtype) {
             static char ct_buffer[256];
             snprintf(ct_buffer, sizeof(ct_buffer), "%s/%s", ct->type, ct->subtype);
             content_type = ct_buffer;
-            fprintf(stderr, "[C-DEBUG] Content-Type extracted: %s\n", content_type);
+            if (debug) fprintf(stderr, "[C-DEBUG] Content-Type: %s\n", content_type);
         } else {
-            fprintf(stderr, "[C-DEBUG] No Content-Type found (ct=%p)\n", (void*)ct);
+            if (debug) fprintf(stderr, "[C-DEBUG] No Content-Type found\n");
         }
     }
     
@@ -2850,12 +3115,18 @@ int client_process_events(ClientContext *ctx, int timeout_ms, zval *events_array
     int tv_ms = timeout_ms % 1000;
     int count = 0;
     
-    eXosip_lock(ctx->ctx);
-    eXosip_automatic_action(ctx->ctx);
-    eXosip_unlock(ctx->ctx);
-    
     eXosip_event_t *evt;
-    while ((evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms)) != NULL) {
+    while (1) {
+        evt = eXosip_event_wait(ctx->ctx, tv_sec, tv_ms);
+
+        eXosip_lock(ctx->ctx);
+        eXosip_automatic_action(ctx->ctx);
+        eXosip_unlock(ctx->ctx);
+
+        if (!evt) {
+            break;
+        }
+
         zval event_item;
         array_init(&event_item);
         
@@ -2886,7 +3157,7 @@ int client_process_events(ClientContext *ctx, int timeout_ms, zval *events_array
         count++;
         
         tv_sec = 0;
-        tv_ms = 0;
+        tv_ms = 5;
     }
     
     return count;
@@ -3015,7 +3286,17 @@ int sip_start_master_process(SipContext *ctx) {
     if (sip_fork_worker(ctx) < 0) {
         return -1;
     }
-    
+
+    // Master: 追加写入 Worker PID 到 PID 文件（用于状态查询时正确区分进程类型）
+    if (!ctx->is_worker && ctx->worker_pid > 0 && strlen(ctx->pid_file) > 0) {
+        FILE *fp = fopen(ctx->pid_file, "a");
+        if (fp) {
+            fprintf(fp, "%d\n", ctx->worker_pid);
+            fclose(fp);
+            fprintf(stderr, "[Master] Worker PID appended to PID file: worker_pid=%d\n", ctx->worker_pid);
+        }
+    }
+
     // Worker 进程：分配 Long Task 数组（但不预先 fork）
     if (ctx->is_worker) {
         if (ctx->long_task_count > 0) {
@@ -3841,20 +4122,26 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
     pid_t master_pid = 0;
     int task_count = 0;
     int long_task_count = 0;
+    pid_t worker_pid = 0;
     char cmd[512];  // 声明 cmd 缓冲区
-    
-    // 读取 Master PID 和进程配置
+
+    // 读取 PID 文件格式：
+    //   Line1: master_pid
+    //   Line2: task_count
+    //   Line3: long_task_count
+    //   Line4: worker_pid (追加写入，由 sip_start_master_process 在 fork Worker 后写入)
     if (fscanf(fp, "%d", &master_pid) != 1) {
         fclose(fp);
         return -1;
     }
-    // 尝试读取 task_count 和 long_task_count（兼容旧版本）
+    // 尝试读取 task_count、long_task_count、worker_pid（兼容旧版本）
     fscanf(fp, "%d", &task_count);
     fscanf(fp, "%d", &long_task_count);
+    fscanf(fp, "%d", &worker_pid);
     fclose(fp);
-    
-    fprintf(stderr, "[DEBUG] Read from PID file: master=%d, tasks=%d, long_tasks=%d\n",
-            master_pid, task_count, long_task_count);
+
+    fprintf(stderr, "[DEBUG] Read from PID file: master=%d, tasks=%d, long_tasks=%d, worker=%d\n",
+            master_pid, task_count, long_task_count, worker_pid);
     
     // 检查 Master 进程是否存在
     if (kill(master_pid, 0) != 0) {
@@ -3954,16 +4241,34 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
         }
         pclose(ps);
         
-        // 第一个子进程通常是 Worker
-        if (child_count > 0) {
+        // 正确识别 Worker 进程：
+        // fork 顺序：Task-0..N（先，PID 小） → Worker（后，PID 大）
+        // ps 按 PID 升序返回，所以 child_pids[0..task_count-1] = Tasks，
+        // child_pids[task_count] = Worker。
+        // 若 PID 文件中有 worker_pid（第4行），优先使用它来精确匹配。
+        pid_t actual_worker_pid = 0;
+        if (worker_pid > 0) {
+            // PID 文件记录了 Worker PID，直接使用
+            actual_worker_pid = worker_pid;
+        } else if (child_count > task_count) {
+            // 兼容旧版本 PID 文件（无 worker_pid 行）：
+            // Task 先 fork（PID 小），Worker 后 fork（PID 大），取索引 task_count
+            actual_worker_pid = child_pids[task_count];
+        } else if (child_count > 0) {
+            // 降级：只有一个子进程时，认为是 Worker
+            actual_worker_pid = child_pids[child_count - 1];
+        }
+
+        // 填充 Worker 信息
+        if (actual_worker_pid > 0 && kill(actual_worker_pid, 0) == 0) {
             zval worker_info;
             array_init(&worker_info);
-            add_assoc_long(&worker_info, "pid", child_pids[0]);
+            add_assoc_long(&worker_info, "pid", actual_worker_pid);
             add_assoc_string(&worker_info, "status", "running");
-            
+
             // 获取 Worker 进程内存和 FD
 #ifdef __APPLE__
-            snprintf(cmd, sizeof(cmd), "ps -o rss=,vsz= -p %d", child_pids[0]);
+            snprintf(cmd, sizeof(cmd), "ps -o rss=,vsz= -p %d", actual_worker_pid);
             FILE *ps_worker = popen(cmd, "r");
             if (ps_worker) {
                 long rss_kb = 0, vsz_kb = 0;
@@ -3973,8 +4278,8 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
                 }
                 pclose(ps_worker);
             }
-            
-            snprintf(cmd, sizeof(cmd), "lsof -p %d 2>/dev/null | wc -l", child_pids[0]);
+
+            snprintf(cmd, sizeof(cmd), "lsof -p %d 2>/dev/null | wc -l", actual_worker_pid);
             FILE *lsof_worker = popen(cmd, "r");
             if (lsof_worker) {
                 int fd_count = 0;
@@ -3983,73 +4288,154 @@ int sip_read_process_status_from_pid(const char *pid_file, zval *status_array) {
                 }
                 pclose(lsof_worker);
             }
+#else
+            snprintf(cmd, sizeof(cmd), "/proc/%d/status", actual_worker_pid);
+            FILE *wstatus = fopen(cmd, "r");
+            if (wstatus) {
+                char line[256];
+                while (fgets(line, sizeof(line), wstatus)) {
+                    if (strncmp(line, "VmRSS:", 6) == 0) {
+                        long rss_kb;
+                        if (sscanf(line + 6, "%ld", &rss_kb) == 1)
+                            add_assoc_long(&worker_info, "memory_rss_kb", rss_kb);
+                    } else if (strncmp(line, "VmSize:", 7) == 0) {
+                        long vsz_kb;
+                        if (sscanf(line + 7, "%ld", &vsz_kb) == 1)
+                            add_assoc_long(&worker_info, "memory_vsz_kb", vsz_kb);
+                    }
+                }
+                fclose(wstatus);
+            }
+            snprintf(cmd, sizeof(cmd), "/proc/%d/fd", actual_worker_pid);
+            DIR *wfd_dir = opendir(cmd);
+            if (wfd_dir) {
+                int fd_count = 0;
+                struct dirent *wentry;
+                while ((wentry = readdir(wfd_dir)) != NULL) {
+                    if (wentry->d_name[0] != '.') fd_count++;
+                }
+                closedir(wfd_dir);
+                add_assoc_long(&worker_info, "fd_count", fd_count);
+            }
 #endif
-            
+
             add_assoc_zval(status_array, "worker", &worker_info);
         }
-        
-        // 根据 PID 文件中的配置信息正确区分 Task 和 Long Task
-        // fork 顺序：Worker (child_pids[0]) → Tasks → Long Tasks
-        
-        if (child_count > 1) {
+
+        // Task 进程：Master 的直接子进程中排除 Worker，剩余的是 Task
+        if (child_count > 0) {
             zval tasks_array;
             array_init(&tasks_array);
-            
-            zval long_tasks_array;
-            array_init(&long_tasks_array);
-            
-            // 子进程分布：
-            // child_pids[0] = Worker
-            // child_pids[1..task_count] = Tasks
-            // child_pids[task_count+1..task_count+long_task_count] = Long Tasks
-            
-            for (int i = 1; i < child_count; i++) {
+
+            int task_idx = 0;
+            for (int i = 0; i < child_count; i++) {
+                if (child_pids[i] == actual_worker_pid) continue;  // 跳过 Worker
+
                 zval process_info;
                 array_init(&process_info);
                 add_assoc_long(&process_info, "pid", child_pids[i]);
-                add_assoc_string(&process_info, "status", "running");
-                
-                // 获取进程内存
+                int is_alive = (kill(child_pids[i], 0) == 0);
+                add_assoc_string(&process_info, "status", is_alive ? "running" : "dead");
+
 #ifdef __APPLE__
                 snprintf(cmd, sizeof(cmd), "ps -o rss= -p %d", child_pids[i]);
                 FILE *ps_proc = popen(cmd, "r");
                 if (ps_proc) {
                     long rss_kb = 0;
-                    if (fscanf(ps_proc, "%ld", &rss_kb) == 1) {
+                    if (fscanf(ps_proc, "%ld", &rss_kb) == 1)
                         add_assoc_long(&process_info, "memory_rss_kb", rss_kb);
-                    }
                     pclose(ps_proc);
                 }
-#endif
-                
-                // 根据索引判断进程类型
-                if (i <= task_count) {
-                    // Task 进程
-                    add_assoc_long(&process_info, "id", i - 1);
-                    add_next_index_zval(&tasks_array, &process_info);
-                } else if (i <= task_count + long_task_count) {
-                    // Long Task 进程
-                    add_assoc_long(&process_info, "id", i - task_count - 1);
-                    add_next_index_zval(&long_tasks_array, &process_info);
-                } else {
-                    // 未知进程（不应该出现）
-                    zval_ptr_dtor(&process_info);
+#else
+                snprintf(cmd, sizeof(cmd), "/proc/%d/status", child_pids[i]);
+                FILE *tstat = fopen(cmd, "r");
+                if (tstat) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), tstat)) {
+                        if (strncmp(line, "VmRSS:", 6) == 0) {
+                            long rss_kb;
+                            if (sscanf(line + 6, "%ld", &rss_kb) == 1)
+                                add_assoc_long(&process_info, "memory_rss_kb", rss_kb);
+                            break;
+                        }
+                    }
+                    fclose(tstat);
                 }
+#endif
+
+                add_assoc_long(&process_info, "id", task_idx++);
+                add_next_index_zval(&tasks_array, &process_info);
             }
-            
-            if (task_count > 0) {
+
+            if (task_idx > 0) {
                 add_assoc_zval(status_array, "tasks", &tasks_array);
             } else {
                 zval_ptr_dtor(&tasks_array);
             }
-            
-            if (long_task_count > 0) {
-                add_assoc_zval(status_array, "long_tasks", &long_tasks_array);
+        }
+
+        // Long Task 进程：Worker 的子进程（ppid = actual_worker_pid）
+        if (long_task_count > 0 && actual_worker_pid > 0) {
+            zval long_tasks_array;
+            array_init(&long_tasks_array);
+
+#ifdef __APPLE__
+            snprintf(cmd, sizeof(cmd), "ps -o pid=,ppid= -A | awk '$2 == %d {print $1}'", actual_worker_pid);
+#else
+            snprintf(cmd, sizeof(cmd), "ps --ppid %d -o pid=", actual_worker_pid);
+#endif
+            FILE *ps_lt = popen(cmd, "r");
+            if (ps_lt) {
+                pid_t lt_pid;
+                int lt_idx = 0;
+                while (fscanf(ps_lt, "%d", &lt_pid) == 1) {
+                    zval lt_info;
+                    array_init(&lt_info);
+                    add_assoc_long(&lt_info, "id", lt_idx);
+                    add_assoc_long(&lt_info, "pid", lt_pid);
+                    int lt_alive = (kill(lt_pid, 0) == 0);
+                    add_assoc_string(&lt_info, "status", lt_alive ? "running" : "dead");
+
+#ifdef __APPLE__
+                    snprintf(cmd, sizeof(cmd), "ps -o rss= -p %d", lt_pid);
+                    FILE *ps_ltm = popen(cmd, "r");
+                    if (ps_ltm) {
+                        long rss_kb = 0;
+                        if (fscanf(ps_ltm, "%ld", &rss_kb) == 1)
+                            add_assoc_long(&lt_info, "memory_rss_kb", rss_kb);
+                        pclose(ps_ltm);
+                    }
+#else
+                    snprintf(cmd, sizeof(cmd), "/proc/%d/status", lt_pid);
+                    FILE *ltstat = fopen(cmd, "r");
+                    if (ltstat) {
+                        char line[256];
+                        while (fgets(line, sizeof(line), ltstat)) {
+                            if (strncmp(line, "VmRSS:", 6) == 0) {
+                                long rss_kb;
+                                if (sscanf(line + 6, "%ld", &rss_kb) == 1)
+                                    add_assoc_long(&lt_info, "memory_rss_kb", rss_kb);
+                                break;
+                            }
+                        }
+                        fclose(ltstat);
+                    }
+#endif
+                    add_next_index_zval(&long_tasks_array, &lt_info);
+                    lt_idx++;
+                }
+                pclose(ps_lt);
+
+                if (lt_idx > 0) {
+                    add_assoc_zval(status_array, "long_tasks", &long_tasks_array);
+                } else {
+                    zval_ptr_dtor(&long_tasks_array);
+                }
             } else {
                 zval_ptr_dtor(&long_tasks_array);
             }
         }
-        
+
         add_assoc_long(status_array, "total_processes", child_count + 1);
     }
     
@@ -4106,6 +4492,3 @@ int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len) {
     
     return 0;
 }
-
-
-
