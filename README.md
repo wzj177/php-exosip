@@ -62,6 +62,11 @@ Master (监控) → Worker (SIP 事件循环) → Task Pool (异步任务)
 # Ubuntu/Debian 一键编译
 ./build_ubuntu.sh --php-version=8.2
 
+# Centos 一键编译
+./build_cenos.sh --php-version=8.2
+
+# macos 一键编译(这个脚本是固定了php路径的，需要自行修改）
+./build_macos_fix.sh
 # 或手动编译
 phpize
 ./configure --enable-exosip=/path/to/osip-build/libs
@@ -72,7 +77,19 @@ sudo make install
 echo "extension=exosip.so" | sudo tee /etc/php/8.2/mods-available/exosip.ini
 sudo phpenmod exosip
 ```
+### 检测扩展
+`php --ri exosip`
 
+```
+[root@VM-4-4-centos php-exosip]#php --ri exosip
+
+exosip
+
+php-exosip support => enabled
+Version => 1.0.1
+Build date => Jun  1 2026 18:07:00
+Event extension detected => yes
+```
 ### 基础示例
 
 ```php
