@@ -64,6 +64,10 @@ if test "$PHP_EXOSIP" != "no"; then
   dnl --start-group/--end-group handles circular deps between archives.
   EXOSIP_SHARED_LIBADD="-Wl,--start-group $EXOSIP_LIB_DIR/libeXosip2.a $EXOSIP_LIB_DIR/libosip2.a $EXOSIP_LIB_DIR/libosipparser2.a -Wl,--end-group $EXOSIP_SHARED_LIBADD"
   PHP_EVAL_LIBLINE([-lresolv -lpthread -lrt -ldl], [EXOSIP_SHARED_LIBADD])
+
+  dnl CentOS/GCC may default to gnu89, but the extension uses C99 syntax
+  dnl such as for-loop initial declarations: for (int i = ...).
+  CFLAGS="$CFLAGS -std=gnu99"
   
   dnl Set source files
   PHP_NEW_EXTENSION([exosip], [php_exosip.c exosip_wrapper.c], [$ext_shared])
