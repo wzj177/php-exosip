@@ -11,7 +11,6 @@
 .deps/
 modules/
 build/
-# Autotools 生成文件
 autom4te.cache/
 config.h
 config.h.in
@@ -21,7 +20,6 @@ config.cache
 config.nice
 configure
 aclocal.m4
-configure.ac
 libtool
 Makefile
 Makefile.fragments
@@ -41,39 +39,48 @@ core.*
 *~
 .DS_Store
 
+# ============================================
 # 测试和调试文件
+# ============================================
 crash_log.txt
 gb28181_client_crash_log.txt
 sip_client_test
 test_exosip_udp
+test_exosip_tcp
 debug_server.sh
 get_crash_stack.sh
+link_fix.sh
+test_fix.php
 
 # ============================================
-# 示例和文档（保留必要的）
+# 内部文档（不开源）
 # ============================================
+docs/
+CODEBASE_ANALYSIS.md
 
-docs/GB28181-Service/
-examples/GB28181-Service/
-examples/webrtc-demo/
-examples/protocol/
-
-# 隐藏测试和调试示例
+# ============================================
+# 示例中的调试/测试文件
+# ============================================
 examples/test_*.php
 examples/exosip_wrapper_v1.c
 examples/ua.c
 examples/SipServer.cpp
 examples/ARCHITECTURE.md
+examples/GB28181-Service/
+examples/webrtc-demo/
+examples/protocol/
+examples/wvp
+examples/gbvr-iot
 
 # ============================================
-# 第三方库编译目录
+# 第三方库编译产物
 # ============================================
 osip-build/build_osip_src/
 osip-build/libs/
 osip-build/libs-530/
 
 # ============================================
-# IDE 和编辑器配置
+# IDE / 编辑器
 # ============================================
 .vscode/
 .idea/
@@ -82,32 +89,17 @@ osip-build/libs-530/
 *.sublime-workspace
 
 # ============================================
-# 备份和原始文件
+# 备份文件
 # ============================================
 *_original.c
 *_original.h
 *.bak
 *.backup
 *_old
+*.txt
 
 # ============================================
-# PHP 临时文件
+# PHP
 # ============================================
 vendor/
 composer.lock
-test_fix.php
-
-# ============================================
-# 构建脚本（保留主要的）
-# ============================================
-link_fix.sh
-
-
-*.txt
-
-.github/
-
-examples/wvp
-
-
-examples/gbvr-iot

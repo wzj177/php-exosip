@@ -13,16 +13,24 @@
 - ✅ **跨平台** - Linux/macOS/Windows
 - ✅ **生产就绪** - 经过压测验证（1000+并发）
 
-## 平台支持
+## 平台说明
 
-| 平台 | UDP | TCP | 推荐 |
-|------|-----|-----|------|
-| **Linux** | ✅ | ✅ | TCP或UDP |
-| **macOS** | ✅ | ⚠️ | UDP（TCP有限制） |
-| **Windows** | ✅ | ❌ | UDP |
+本项目通过不同的 `config.m4` 支持不同操作系统：
 
-> **注意**：macOS 和 Windows 平台 TCP 支持受限，推荐使用 UDP 模式。
-> 生产环境建议使用 Linux + TCP。
+| 文件 | 平台 | 说明 |
+|------|------|------|
+| `config.m4` | Linux (Ubuntu/CentOS/Debian 等) | 使用 `--start-group`/`--end-group` 处理 GNU ld 单遍链接 |
+| `config_macos.m4` | macOS | 使用 macOS 框架库（CFNetwork 等），ld64 自动处理链接顺序 |
+
+macOS 用户编译前需要切换配置文件：
+
+```bash
+cp config_macos.m4 config.m4
+```
+
+或使用 `build_macos_fix.sh` 自动处理。
+
+> **注意**：macOS TCP 支持受限，推荐使用 UDP 模式。生产环境建议使用 Linux + TCP。
 
 ## 架构说明
 
@@ -42,12 +50,6 @@ Master (监控) → Worker (SIP 事件循环) → Task Pool (异步任务)
 - ✅ Task→Worker 实时推送（sendToWorker）
 - ✅ TCP 连接管理（device_id ↔ fd 映射）
 
-**详细文档**：
-- [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
-- [Task→Worker 管道通信](docs/MASTER_WORKER_TASK_IMPLEMENTATION.md)
-- [TCP 模式支持](docs/TCP_MODE_SUPPORT.md)
-- [Task 进程安全性](docs/TASK_SERVER_OBJECT_SAFETY.md)
-
 ### 2. 单进程模式（适合小型应用）
 
 直接使用 `run()` 方法，适合快速开发和测试。
@@ -57,9 +59,12 @@ Master (监控) → Worker (SIP 事件循环) → Task Pool (异步任务)
 ### 安装
 
 ```bash
-# 编译安装
+# Ubuntu/Debian 一键编译
+./build_ubuntu.sh --php-version=8.2
+
+# 或手动编译
 phpize
-./configure
+./configure --enable-exosip=/path/to/osip-build/libs
 make
 sudo make install
 
@@ -640,25 +645,19 @@ CMD ["php", "server.php"]
 
 ```
 php-exosip/
-├── README.md              # 本文件
-├── php_exosip.c          # 主扩展代码（2536行）
-├── exosip_wrapper.c      # eXosip2 封装（3123行）
-├── exosip_wrapper.h      # 头文件
-├── config.m4             # 编译配置
-├── docs/
-│   ├── MASTER_WORKER_TASK.md  # Master-Worker-Task 架构详解 ⭐️
-│   ├── exosip.stub.php        # IDE 支持文件
-│   └── PLATFORM_SUPPORT.md    # 平台支持说明
-├── examples/
-│   ├── gb28181_server.php           # GB28181 服务端示例
-│   ├── gb28181_server_status.php    # 进程状态查询脚本
-│   ├── protocol/GB28181Handler.php  # GB28181 协议处理器
-│   ├── test_event_debug.php         # 事件调试
-│   ├── CrossPlatformSipServer.php   # 跨平台封装
-│   └── GB28181-Service/             # C++ 参考实现
-└── tests/
-    ├── test_exosip_tcp.c   # C 测试程序
-    └── test_exosip_udp.c   # UDP 测试程序
+├── php_exosip.c          # PHP 扩展主代码（类定义、Zend API 绑定）
+├── exosip_wrapper.c      # eXosip2 封装（核心 SIP 逻辑、多进程架构）
+├── exosip_wrapper.h      # C 头文件（结构体、枚举、函数声明）
+├── php_exosip.h          # PHP 扩展头文件
+├── ServerInfo.h           # 服务器配置结构体
+├── Client.h              # 客户端配置结构体
+├── config.m4             # 编译配置（Linux）
+├── config_macos.m4       # 编译配置（macOS）
+├── build_ubuntu.sh       # Ubuntu 一键编译脚本
+├── build_centos.sh       # CentOS 一键编译脚本
+├── osip-build/           # osip/eXosip2 编译脚本
+├── examples/             # 使用示例
+└── tests/                # C 测试程序
 ```
 
 ## 常见问题
@@ -701,16 +700,6 @@ $sip->onTask = function($taskId, $data) {
 };
 ```
 
-**系统优化**：
-```bash
-# /etc/sysctl.conf
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.udp_mem = 16384 131072 262144
-```
-
-**详细性能优化**：参见 [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
-
 ### 4. 调试技巧？
 
 ```php
@@ -742,52 +731,16 @@ make
 
 ```bash
 # C 测试程序
-make -f Makefile.test
+cd tests && bash build_test.sh
 ./test_exosip_udp
-
-# PHP 测试
-php examples/test_event_debug.php
-```
-
-### IDE 支持
-
-```php
-// 在项目中包含 stub 文件（仅用于 IDE，不要 require）
-// File: composer.json
-{
-    "autoload-dev": {
-        "files": ["vendor/docs/exosip.stub.php"]
-    }
-}
+./test_exosip_tcp
 ```
 
 ## 参考文档
 
-### 官方文档
 - [eXosip2 官网](http://savannah.nongnu.org/projects/exosip)
 - [RFC 3261 - SIP](https://tools.ietf.org/html/rfc3261)
 - [GB/T 28181-2016](https://openstd.samr.gov.cn/)
-
-### 项目文档
-
-**核心架构** ⭐️
-- [Master-Worker-Task 架构说明](docs/MASTER_WORKER_TASK.md)
-- [Task→Worker 管道通信实现](docs/MASTER_WORKER_TASK_IMPLEMENTATION.md)
-- [TCP 模式支持](docs/TCP_MODE_SUPPORT.md)
-- [Task 进程安全性分析](docs/TASK_SERVER_OBJECT_SAFETY.md)
-
-**开发指南**
-- [回调错误处理](docs/CALLBACK_ERROR_HANDLING.md)
-- [SIP 客户端实现](docs/CLIENT_IMPLEMENTATION.md)
-- [快速开始](docs/QUICKSTART.md)
-- [平台支持说明](docs/PLATFORM_SUPPORT.md)
-
-**API 参考**
-- [IDE 支持文件 (exosip.stub.php)](docs/exosip.stub.php)
-- [文档索引](docs/README.md)
-
-### 示例项目
-- [GB28181-Service](examples/GB28181-Service/) - C++ 参考实现
 - [ZLMediaKit](https://github.com/ZLMediaKit/ZLMediaKit) - 流媒体服务器
 
 ## 许可证

@@ -350,7 +350,14 @@ cd "$SCRIPT_DIR"
     --enable-exosip="${EXOSIP_DIR}" \
     --with-php-config="${PHP_CONFIG}"
 
-make clean
+make clean || true
+
+# make clean 可能清理掉 osip 静态库，重新编译
+if [ ! -f "${EXOSIP_DIR}/lib/libeXosip2.a" ]; then
+    echo "📦 静态库被清理，重新编译..."
+    build_libs "$EXOSIP_DIR"
+fi
+
 make -j"${JOBS}" || make
 
 # ============================================================
@@ -376,9 +383,11 @@ echo "[链接] 绕过 libtool，手动链接 .so..."
 gcc -shared -o .libs/exosip.so \
     .libs/php_exosip.o .libs/exosip_wrapper.o \
     -Wl,--whole-archive \
-    "${EXOSIP_DIR}/lib/libosipparser2.a" \
-    "${EXOSIP_DIR}/lib/libosip2.a" \
+    -Wl,--start-group \
     "${EXOSIP_DIR}/lib/libeXosip2.a" \
+    "${EXOSIP_DIR}/lib/libosip2.a" \
+    "${EXOSIP_DIR}/lib/libosipparser2.a" \
+    -Wl,--end-group \
     -Wl,--no-whole-archive \
     -lresolv -lpthread -lrt -ldl
 
