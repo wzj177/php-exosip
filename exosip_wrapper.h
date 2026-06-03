@@ -273,6 +273,7 @@ typedef struct _sip_context {
     int is_worker;
     int is_task;
     int is_long_task;  // Long Task 进程标志
+    int long_task_slot_id;  // Long Task 进程的槽位编号（0, 1, ...），非LongTask进程为-1
     int task_worker_id;
     
     // 任务统计

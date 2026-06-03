@@ -119,6 +119,9 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_startlongtask, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_longtaskgetid, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_getprocessstatus, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
@@ -3346,31 +3349,46 @@ PHP_METHOD(ExoSip, startLongTask) {
         RETURN_FALSE;
     }
     
+    // 先找到空闲槽位（fork 前确定，子进程通过内存副本继承 slot_id）
+    int slot_id = -1;
+    for (int i = 0; i < obj->ctx->long_task_count; i++) {
+        if (obj->ctx->long_task_pids[i] == 0) {
+            slot_id = i;
+            break;
+        }
+    }
+
+    if (slot_id == -1) {
+        php_error_docref(NULL, E_WARNING, "No free Long Task slot (configured: %d, all occupied)", obj->ctx->long_task_count);
+        RETURN_FALSE;
+    }
+
     // 直接在此处 fork Long Task 子进程（利用 fork 的内存副本特性）
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == -1) {
         php_error_docref(NULL, E_WARNING, "Failed to create socketpair: %s", strerror(errno));
         RETURN_FALSE;
     }
-    
+
     pid_t pid = fork();
-    
+
     if (pid < 0) {
         close(sv[0]);
         close(sv[1]);
         php_error_docref(NULL, E_WARNING, "Failed to fork Long Task: %s", strerror(errno));
         RETURN_FALSE;
     }
-    
+
     if (pid == 0) {
         // Long Task 子进程
         close(sv[0]);
-        
+
         // 设置 Long Task 标志和 Worker 通信 socket
         obj->ctx->is_long_task = 1;
         obj->ctx->is_worker = 0;
         obj->ctx->is_task = 0;
         obj->ctx->worker_sockfd = sv[1];  // 保存通向 Worker 的 socket
+        obj->ctx->long_task_slot_id = slot_id;  // 槽位编号（fork 前已确定）
         
         // 关闭所有继承的 fd（避免泄漏）
         if (obj->ctx->task_sockfds) {
@@ -3429,35 +3447,42 @@ PHP_METHOD(ExoSip, startLongTask) {
     
     // Worker 父进程
     close(sv[1]);
-    
+
     // 设置 sv[0] 为非阻塞模式（重要！）
     int flags = fcntl(sv[0], F_GETFL, 0);
     if (flags != -1) {
         fcntl(sv[0], F_SETFL, flags | O_NONBLOCK);
     }
-    
-    // 找到空闲槽位并记录 PID
-    int slot_id = -1;
-    for (int i = 0; i < obj->ctx->long_task_count; i++) {
-        if (obj->ctx->long_task_pids[i] == 0) {
-            obj->ctx->long_task_pids[i] = pid;
-            obj->ctx->long_task_sockfds[i] = sv[0];
-            slot_id = i;
-            break;
-        }
-    }
-    
-    if (slot_id == -1) {
-        // 没有空槽位，关闭 socket
-        close(sv[0]);
-        php_error_docref(NULL, E_WARNING, "No free slot to track Long Task PID=%d", pid);
-    }
-    
+
+    // 记录 PID 到预分配的槽位（fork 前已确定）
+    obj->ctx->long_task_pids[slot_id] = pid;
+    obj->ctx->long_task_sockfds[slot_id] = sv[0];
+
     if (obj->ctx->server_info.debug) {
         fprintf(stderr, "[Worker] Started Long Task PID=%d (slot=%d)\n", pid, slot_id);
     }
     
     RETURN_TRUE;
+}
+
+/* ========== ExoSip::longtaskGetId() ========== */
+/**
+ * 获取当前 Long Task 进程的槽位编号
+ * 在 Long Task 进程中调用返回 0, 1, 2, ...
+ * 在其他进程（Worker/Task/Master）中调用返回 -1
+ *
+ * @return int 槽位编号，或 -1（非 Long Task 进程）
+ */
+PHP_METHOD(ExoSip, longtaskGetId) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+
+    if (!obj->ctx) {
+        RETURN_LONG(-1);
+    }
+
+    RETURN_LONG(obj->ctx->long_task_slot_id);
 }
 
 /* ========== ExoSip::getProcessStatus() ========== */
@@ -3533,6 +3558,7 @@ const zend_function_entry exosip_methods[] = {
     PHP_ME(ExoSip, addTask, arginfo_exosip_addtask, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendToWorker, arginfo_exosip_sendtoworker, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, startLongTask, arginfo_exosip_startlongtask, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, longtaskGetId, arginfo_exosip_longtaskgetid, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getProcessStatus, arginfo_exosip_getprocessstatus, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, getRunStatus, arginfo_exosip_getrunstatus, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     
