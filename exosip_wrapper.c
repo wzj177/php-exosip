@@ -78,6 +78,8 @@ SipContext* sip_init(ServerInfo *info) {
     ctx->is_master = 0;
     ctx->is_worker = 0;
     ctx->is_task = 0;
+    ctx->is_long_task = 0;
+    ctx->long_task_slot_id = -1;
     ctx->task_worker_id = -1;
     ctx->tasks_posted = 0;
     ctx->tasks_failed = 0;
