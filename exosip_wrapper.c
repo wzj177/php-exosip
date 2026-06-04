@@ -3431,11 +3431,7 @@ int sip_fork_task_workers(SipContext *ctx) {
 }
 
 int sip_fork_long_task_workers(SipContext *ctx) {
-    fprintf(stderr, "[DEBUG] sip_fork_long_task_workers: long_task_count=%d, is_worker=%d\n", 
-            ctx->long_task_count, ctx->is_worker);
-    
     if (ctx->long_task_count <= 0) {
-        fprintf(stderr, "[DEBUG] No Long Task workers configured, skipping\n");
         return 0;
     }
     
@@ -3453,9 +3449,6 @@ int sip_fork_long_task_workers(SipContext *ctx) {
             ctx->long_task_pids[i] = 0;
             ctx->long_task_sockfds[i] = -1;
         }
-        
-        fprintf(stderr, "[DEBUG] Allocated Long Task arrays: pids=%p, sockfds=%p\n",
-                (void*)ctx->long_task_pids, (void*)ctx->long_task_sockfds);
     }
     
     for (int i = 0; i < ctx->long_task_count; i++) {
@@ -3509,7 +3502,7 @@ int sip_fork_long_task_workers(SipContext *ctx) {
             ctx->task_worker_id = i;
             ctx->task_sockfd = sv[1];
             
-            fprintf(stderr, "[LongTask-%d] Started PID=%d (cleaned inherited fds)\n", i, getpid());
+            if (ctx->server_info.debug) fprintf(stderr, "[LongTask-%d] Started PID=%d (cleaned inherited fds)\n", i, getpid());
             
             // 进入休眠等待循环
             sip_long_task_loop(ctx, sv[1]);
@@ -3528,7 +3521,7 @@ int sip_fork_long_task_workers(SipContext *ctx) {
     }
     
     const char *prefix = ctx->is_worker ? "Worker" : "Master";
-    fprintf(stderr, "[%s] Forked %d Long Task worker(s)\n", prefix, ctx->long_task_count);
+    if (ctx->server_info.debug) fprintf(stderr, "[%s] Forked %d Long Task worker(s)\n", prefix, ctx->long_task_count);
     return 0;
 }
 
@@ -3646,8 +3639,8 @@ void sip_task_loop(SipContext *ctx, int sockfd) {
     signal(SIGTERM, sigterm_handler);
     
     // 调试:检查回调是否设置
-    fprintf(stderr, "[Task-%d] Starting, callback status: task_callback=%s\n", 
-           ctx->task_worker_id, 
+    if (ctx->server_info.debug) fprintf(stderr, "[Task-%d] Starting, callback status: task_callback=%s\n",
+           ctx->task_worker_id,
            Z_ISUNDEF(ctx->task_callback) ? "NOT SET" : "SET");
     
     while (!g_shutdown_flag) {
@@ -3774,9 +3767,9 @@ void sip_long_task_loop(SipContext *ctx, int sockfd) {
         return;
     }
     
-    fprintf(stderr, "[LongTask-%d] Received callback (%zu bytes), executing...\n", 
+    if (ctx->server_info.debug) fprintf(stderr, "[LongTask-%d] Received callback (%zu bytes), executing...\n",
            ctx->task_worker_id, msg_hdr.data_len);
-    
+
     // 反序列化并执行回调
     zval callback;
     php_unserialize_data_t var_hash;
@@ -3803,8 +3796,8 @@ void sip_long_task_loop(SipContext *ctx, int sockfd) {
     // 回调应该通过闭包捕获 $server: function() use ($server) { ... }
     // 这样 sendToWorker() 可以直接工作（ctx->is_task 已设置）
     
-    fprintf(stderr, "[LongTask-%d] Executing callback (may block indefinitely)...\n", ctx->task_worker_id);
-    
+    if (ctx->server_info.debug) fprintf(stderr, "[LongTask-%d] Executing callback (may block indefinitely)...\n", ctx->task_worker_id);
+
     zval retval;
     zend_fcall_info fci;
     zend_fcall_info_cache fcc;
@@ -4489,7 +4482,7 @@ int sip_task_send_to_worker(SipContext *ctx, const char *data, size_t len) {
         return -1;
     }
     
-    fprintf(stderr, "[%s] Sent pipe message #%lu to Worker (%zu bytes)\n", 
+    if (ctx->server_info.debug) fprintf(stderr, "[%s] Sent pipe message #%lu to Worker (%zu bytes)\n",
            process_type, msg_hdr.task_id, len);
     
     return 0;
