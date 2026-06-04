@@ -1258,7 +1258,43 @@ int sip_send_notify_response(SipContext *ctx, int tid, int code) {
     }
     
     if (debug) fprintf(stderr, "[DEBUG] ✓ NOTIFY response sent: tid=%d, code=%d\n", tid, code);
-    
+
+    return 0;
+}
+
+/**
+ * 响应出站订阅的 NOTIFY 事件（平台作为订阅者收到设备的 NOTIFY）
+ * 使用 eXosip_subscription_build_answer（出站订阅 API）
+ */
+int sip_send_subscription_response(SipContext *ctx, int tid, int code) {
+    if (!ctx || tid <= 0) {
+        return -1;
+    }
+
+    int debug = ctx->server_info.debug;
+
+    if (debug) {
+        fprintf(stderr, "[DEBUG] Sending subscription response: tid=%d, code=%d\n", tid, code);
+    }
+
+    osip_message_t *answer = NULL;
+    eXosip_lock(ctx->ctx);
+
+    int ret = eXosip_subscription_build_answer(ctx->ctx, tid, code, &answer);
+
+    if (ret == 0 && answer) {
+        ret = eXosip_subscription_send_answer(ctx->ctx, tid, code, answer);
+    }
+
+    eXosip_unlock(ctx->ctx);
+
+    if (ret < 0) {
+        fprintf(stderr, "[ERROR] sendSubscriptionResponse failed: tid=%d, code=%d, ret=%d (outgoing subscription transaction not found)\n", tid, code, ret);
+        return -1;
+    }
+
+    if (debug) fprintf(stderr, "[DEBUG] ✓ Subscription response sent: tid=%d, code=%d\n", tid, code);
+
     return 0;
 }
 
