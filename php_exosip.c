@@ -1317,9 +1317,7 @@ PHP_METHOD(ExoSip, init) {
     
     val = zend_hash_str_find(Z_ARRVAL_P(configArr), "long_task_worker_num", 20);
     obj->ctx->long_task_count = (val && Z_TYPE_P(val) == IS_LONG) ? (int)Z_LVAL_P(val) : 1;  // 默认 1
-    
-    fprintf(stderr, "[DEBUG] init(): Set task_count=%d, long_task_count=%d\n", obj->ctx->task_count, obj->ctx->long_task_count);
-    
+
     // Set global context for session close operations
     global_sip_ctx = obj->ctx;
     
