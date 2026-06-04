@@ -739,7 +739,7 @@ int sip_send_ack(SipContext *ctx, int dialog_id) {
     eXosip_unlock(ctx->ctx);
     
     if (ret < 0) {
-        if (debug) fprintf(stderr, "[DEBUG] Failed to send ACK: ret=%d\n", ret);
+        fprintf(stderr, "[ERROR] sendAck failed: dialog_id=%d, ret=%d (dialog not found)\n", dialog_id, ret);
         return -1;
     }
     
@@ -1048,7 +1048,7 @@ int sip_send_bye(SipContext *ctx, int call_id, int dialog_id) {
     eXosip_unlock(ctx->ctx);
     
     if (ret < 0) {
-        if (debug) fprintf(stderr, "[DEBUG] Failed to send BYE: ret=%d\n", ret);
+        fprintf(stderr, "[ERROR] sendBye failed: call_id=%d, dialog_id=%d, ret=%d (call not found)\n", call_id, dialog_id, ret);
         return -1;
     }
     
@@ -1253,7 +1253,7 @@ int sip_send_notify_response(SipContext *ctx, int tid, int code) {
     eXosip_unlock(ctx->ctx);
     
     if (ret < 0) {
-        if (debug) fprintf(stderr, "[ERROR] Failed to send NOTIFY response: ret=%d\n", ret);
+        fprintf(stderr, "[ERROR] sendNotifyResponse failed: tid=%d, code=%d, ret=%d (subscription transaction not found or expired)\n", tid, code, ret);
         return -1;
     }
     
@@ -2161,7 +2161,7 @@ int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char 
     }
     
     eXosip_unlock(ctx->ctx);
-    if (debug) fprintf(stderr, "[DEBUG] Failed to build response: %d\n", ret);
+    fprintf(stderr, "[ERROR] sendResponse failed: tid=%d, code=%d, ret=%d (transaction not found or expired)\n", tid, code, ret);
     return -1;
 }
 
@@ -2194,7 +2194,7 @@ int exosip_send_call_answer_wrapper(SipContext *ctx, int tid, int code, const ch
     int ret = eXosip_call_build_answer(ctx->ctx, tid, code, &answer);
     if (ret != 0 || !answer) {
         eXosip_unlock(ctx->ctx);
-        if (debug) fprintf(stderr, "[ERROR] Failed to build CALL answer: ret=%d, tid=%d, code=%d\n", ret, tid, code);
+        fprintf(stderr, "[ERROR] sendCallAnswer failed: tid=%d, code=%d, ret=%d (call transaction not found or expired)\n", tid, code, ret);
         return -1;
     }
 
