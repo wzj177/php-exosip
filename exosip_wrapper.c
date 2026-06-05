@@ -739,7 +739,7 @@ int sip_send_ack(SipContext *ctx, int dialog_id) {
     eXosip_unlock(ctx->ctx);
     
     if (ret < 0) {
-        if (debug) fprintf(stderr, "[DEBUG] Failed to send ACK: ret=%d\n", ret);
+        fprintf(stderr, "[ERROR] sendAck failed: dialog_id=%d, ret=%d (dialog not found)\n", dialog_id, ret);
         return -1;
     }
     
@@ -1048,7 +1048,7 @@ int sip_send_bye(SipContext *ctx, int call_id, int dialog_id) {
     eXosip_unlock(ctx->ctx);
     
     if (ret < 0) {
-        if (debug) fprintf(stderr, "[DEBUG] Failed to send BYE: ret=%d\n", ret);
+        fprintf(stderr, "[ERROR] sendBye failed: call_id=%d, dialog_id=%d, ret=%d (call not found)\n", call_id, dialog_id, ret);
         return -1;
     }
     
@@ -1253,12 +1253,48 @@ int sip_send_notify_response(SipContext *ctx, int tid, int code) {
     eXosip_unlock(ctx->ctx);
     
     if (ret < 0) {
-        if (debug) fprintf(stderr, "[ERROR] Failed to send NOTIFY response: ret=%d\n", ret);
+        fprintf(stderr, "[ERROR] sendNotifyResponse failed: tid=%d, code=%d, ret=%d (subscription transaction not found or expired)\n", tid, code, ret);
         return -1;
     }
     
     if (debug) fprintf(stderr, "[DEBUG] ✓ NOTIFY response sent: tid=%d, code=%d\n", tid, code);
-    
+
+    return 0;
+}
+
+/**
+ * 响应出站订阅的 NOTIFY 事件（平台作为订阅者收到设备的 NOTIFY）
+ * 使用 eXosip_subscription_build_answer（出站订阅 API）
+ */
+int sip_send_subscription_response(SipContext *ctx, int tid, int code) {
+    if (!ctx || tid <= 0) {
+        return -1;
+    }
+
+    int debug = ctx->server_info.debug;
+
+    if (debug) {
+        fprintf(stderr, "[DEBUG] Sending subscription response: tid=%d, code=%d\n", tid, code);
+    }
+
+    osip_message_t *answer = NULL;
+    eXosip_lock(ctx->ctx);
+
+    int ret = eXosip_subscription_build_answer(ctx->ctx, tid, code, &answer);
+
+    if (ret == 0 && answer) {
+        ret = eXosip_subscription_send_answer(ctx->ctx, tid, code, answer);
+    }
+
+    eXosip_unlock(ctx->ctx);
+
+    if (ret < 0) {
+        fprintf(stderr, "[ERROR] sendSubscriptionResponse failed: tid=%d, code=%d, ret=%d (outgoing subscription transaction not found)\n", tid, code, ret);
+        return -1;
+    }
+
+    if (debug) fprintf(stderr, "[DEBUG] ✓ Subscription response sent: tid=%d, code=%d\n", tid, code);
+
     return 0;
 }
 
@@ -2161,7 +2197,7 @@ int exosip_send_response_wrapper(SipContext *ctx, int tid, int code, const char 
     }
     
     eXosip_unlock(ctx->ctx);
-    if (debug) fprintf(stderr, "[DEBUG] Failed to build response: %d\n", ret);
+    fprintf(stderr, "[ERROR] sendResponse failed: tid=%d, code=%d, ret=%d (transaction not found or expired)\n", tid, code, ret);
     return -1;
 }
 
@@ -2194,7 +2230,7 @@ int exosip_send_call_answer_wrapper(SipContext *ctx, int tid, int code, const ch
     int ret = eXosip_call_build_answer(ctx->ctx, tid, code, &answer);
     if (ret != 0 || !answer) {
         eXosip_unlock(ctx->ctx);
-        if (debug) fprintf(stderr, "[ERROR] Failed to build CALL answer: ret=%d, tid=%d, code=%d\n", ret, tid, code);
+        fprintf(stderr, "[ERROR] sendCallAnswer failed: tid=%d, code=%d, ret=%d (call transaction not found or expired)\n", tid, code, ret);
         return -1;
     }
 

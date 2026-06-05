@@ -155,6 +155,11 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendnotifyresponse, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, code, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendsubscriptionresponse, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, tid, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, code, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_exosip_sendnotify, 0, 0, 3)
     ZEND_ARG_TYPE_INFO(0, dialogId, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, subscriptionState, IS_STRING, 0)
@@ -2757,7 +2762,27 @@ PHP_METHOD(ExoSip, sendNotifyResponse) {
     }
     
     int result = sip_send_notify_response(obj->ctx, (int)tid, (int)code);
-    
+
+    RETURN_BOOL(result == 0);
+}
+
+/* ========== ExoSip::sendSubscriptionResponse(int $tid, int $code) ========== */
+PHP_METHOD(ExoSip, sendSubscriptionResponse) {
+    zend_long tid, code;
+
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_LONG(tid)
+        Z_PARAM_LONG(code)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_exosip_obj *obj = php_exosip_from_obj(Z_OBJ_P(getThis()));
+    if (!obj->ctx) {
+        php_error_docref(NULL, E_WARNING, "eXosip not initialized");
+        RETURN_FALSE;
+    }
+
+    int result = sip_send_subscription_response(obj->ctx, (int)tid, (int)code);
+
     RETURN_BOOL(result == 0);
 }
 
@@ -3542,6 +3567,7 @@ const zend_function_entry exosip_methods[] = {
     PHP_ME(ExoSip, refreshSubscribe, arginfo_exosip_refreshsubscribe, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, cancelSubscribe, arginfo_exosip_cancelsubscribe, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendNotifyResponse, arginfo_exosip_sendnotifyresponse, ZEND_ACC_PUBLIC)
+    PHP_ME(ExoSip, sendSubscriptionResponse, arginfo_exosip_sendsubscriptionresponse, ZEND_ACC_PUBLIC)
     PHP_ME(ExoSip, sendNotify, arginfo_exosip_sendnotify, ZEND_ACC_PUBLIC)
     
     /* Configuration and statistics */

@@ -461,6 +461,17 @@ int sip_cancel_subscribe(SipContext *ctx, int subscription_id);
 int sip_send_notify_response(SipContext *ctx, int tid, int code);
 
 /**
+ * 响应出站订阅的 NOTIFY 事件（平台作为订阅者收到设备的 NOTIFY）
+ * 使用 eXosip_subscription_build_answer（出站订阅 API）
+ *
+ * @param ctx SIP 上下文
+ * @param tid 事务 ID
+ * @param code 响应码（通常 200）
+ * @return 0 成功, -1 失败
+ */
+int sip_send_subscription_response(SipContext *ctx, int tid, int code);
+
+/**
  * 发送 NOTIFY 请求（作为事件源主动通知订阅者）
  * 用于 GB28181 目录/报警/移动位置 等事件通知
  * 
