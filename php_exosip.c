@@ -423,6 +423,7 @@ typedef struct _php_sip_event_obj {
     int tid;             // 事务ID
     int call_id;         // Call ID (cid)
     int dialog_id;       // Dialog ID (did)
+    int sub_id;          // Subscription ID (sid, for SUBSCRIBE events)
     int expires;         // Expires 头值（秒）
     char *from_uri;
     char *to_uri;
@@ -468,6 +469,7 @@ static zend_object *php_sip_event_create_object(zend_class_entry *ce) {
     obj->tid = 0;
     obj->call_id = 0;
     obj->dialog_id = 0;
+    obj->sub_id = 0;
     obj->expires = -1;
     obj->from_uri = NULL;
     obj->to_uri = NULL;
@@ -546,6 +548,11 @@ PHP_METHOD(SipEvent, getCallId) {
 PHP_METHOD(SipEvent, getDialogId) {
     php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
     RETURN_LONG(obj->dialog_id);
+}
+
+PHP_METHOD(SipEvent, getSubscriptionId) {
+    php_sip_event_obj *obj = php_sip_event_from_obj(Z_OBJ_P(getThis()));
+    RETURN_LONG(obj->sub_id);
 }
 
 PHP_METHOD(SipEvent, getExpires) {
@@ -829,6 +836,7 @@ const zend_function_entry sip_event_methods[] = {
     PHP_ME(SipEvent, getTid, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getCallId, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getDialogId, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
+    PHP_ME(SipEvent, getSubscriptionId, arginfo_sipevent_gettid, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getExpires, arginfo_sipevent_getexpires, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getSession, arginfo_sipevent_getsession, ZEND_ACC_PUBLIC)
     PHP_ME(SipEvent, getConnection, arginfo_sipevent_getconnection, ZEND_ACC_PUBLIC)
@@ -2102,7 +2110,12 @@ static int php_exosip_parse_event_data(php_sip_event_obj *event_obj, zval *event
     if ((val = zend_hash_str_find(ht, "did", 3)) != NULL && Z_TYPE_P(val) == IS_LONG) {
         event_obj->dialog_id = Z_LVAL_P(val);
     }
-    
+
+    // Parse subscription ID (sid, for SUBSCRIBE/NOTIFY events)
+    if ((val = zend_hash_str_find(ht, "sid", 3)) != NULL && Z_TYPE_P(val) == IS_LONG) {
+        event_obj->sub_id = Z_LVAL_P(val);
+    }
+
     // Parse Expires header
     if ((val = zend_hash_str_find(ht, "expires", 7)) != NULL && Z_TYPE_P(val) == IS_LONG) {
         event_obj->expires = Z_LVAL_P(val);
