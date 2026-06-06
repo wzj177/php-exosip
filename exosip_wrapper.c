@@ -2291,6 +2291,7 @@ void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn,
     add_assoc_long(event_array, "cid", evt->cid);
     add_assoc_long(event_array, "did", evt->did);
     add_assoc_long(event_array, "rid", evt->rid);
+    add_assoc_long(event_array, "sid", evt->sid);  // subscription_id (for SUBSCRIBE events)
     add_assoc_long(event_array, "ss_status", evt->ss_status);
     add_assoc_long(event_array, "ss_reason", evt->ss_reason);
     
