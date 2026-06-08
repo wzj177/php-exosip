@@ -1280,10 +1280,10 @@ int sip_send_subscription_response(SipContext *ctx, int tid, int code) {
     osip_message_t *answer = NULL;
     eXosip_lock(ctx->ctx);
 
-    int ret = eXosip_subscription_build_answer(ctx->ctx, tid, code, &answer);
+    int ret = eXosip_insubscription_build_answer(ctx->ctx, tid, code, &answer);
 
     if (ret == 0 && answer) {
-        ret = eXosip_subscription_send_answer(ctx->ctx, tid, code, answer);
+        ret = eXosip_insubscription_send_answer(ctx->ctx, tid, code, answer);
     }
 
     eXosip_unlock(ctx->ctx);
@@ -1473,6 +1473,7 @@ void sip_event_to_php_array(eXosip_event_t *evt, ConnectionInfo *conn, SessionIn
     add_assoc_long(arr, "cid", evt->cid);
     add_assoc_long(arr, "did", evt->did);
     add_assoc_long(arr, "rid", evt->rid);
+    add_assoc_long(arr, "sid", evt->sid);  // subscription_id (for SUBSCRIBE events)
     
     // 事件类型字符串
     const char *type_name = "UNKNOWN";
@@ -2290,6 +2291,7 @@ void exosip_create_event_object_array(eXosip_event_t *evt, ConnectionInfo *conn,
     add_assoc_long(event_array, "cid", evt->cid);
     add_assoc_long(event_array, "did", evt->did);
     add_assoc_long(event_array, "rid", evt->rid);
+    add_assoc_long(event_array, "sid", evt->sid);  // subscription_id (for SUBSCRIBE events)
     add_assoc_long(event_array, "ss_status", evt->ss_status);
     add_assoc_long(event_array, "ss_reason", evt->ss_reason);
     
