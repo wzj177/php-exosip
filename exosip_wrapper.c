@@ -243,18 +243,22 @@ int sip_stop(SipContext *ctx) {
 
 void sip_destroy(SipContext *ctx) {
     if (!ctx) return;
-    
+
     sip_stop(ctx);
-    
+
     pthread_mutex_lock(&ctx->lock);
     if (ctx->callbacks_valid) {
         if (!Z_ISUNDEF(ctx->event_callback)) zval_ptr_dtor(&ctx->event_callback);
         if (!Z_ISUNDEF(ctx->connection_callback)) zval_ptr_dtor(&ctx->connection_callback);
         if (!Z_ISUNDEF(ctx->message_callback)) zval_ptr_dtor(&ctx->message_callback);
         if (!Z_ISUNDEF(ctx->error_callback)) zval_ptr_dtor(&ctx->error_callback);
+        if (!Z_ISUNDEF(ctx->timer_callback)) zval_ptr_dtor(&ctx->timer_callback);
+        if (!Z_ISUNDEF(ctx->task_callback)) zval_ptr_dtor(&ctx->task_callback);
+        if (!Z_ISUNDEF(ctx->task_finish_callback)) zval_ptr_dtor(&ctx->task_finish_callback);
+        if (!Z_ISUNDEF(ctx->pipe_message_callback)) zval_ptr_dtor(&ctx->pipe_message_callback);
     }
     pthread_mutex_unlock(&ctx->lock);
-    
+
     if (ctx->raw_data_buffer) {
         for (int i = 0; i < ctx->raw_data_size; i++) {
             if (ctx->raw_data_buffer[i].data) {
@@ -263,11 +267,17 @@ void sip_destroy(SipContext *ctx) {
         }
         free(ctx->raw_data_buffer);
     }
-    
+
+    // 释放 Task/LongTask 进程的 pid 和 socket fd 数组
+    if (ctx->task_pids) free(ctx->task_pids);
+    if (ctx->task_sockfds) free(ctx->task_sockfds);
+    if (ctx->long_task_pids) free(ctx->long_task_pids);
+    if (ctx->long_task_sockfds) free(ctx->long_task_sockfds);
+
     if (ctx->ctx) {
         eXosip_quit(ctx->ctx);
     }
-    
+
     pthread_mutex_destroy(&ctx->lock);
     free(ctx);
 }
