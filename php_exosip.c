@@ -1757,8 +1757,9 @@ PHP_METHOD(ExoSip, run) {
                                 continue;  // 跳过后续处理
                             }
                             
-                            Z_TRY_ADDREF(sip_event_obj);
-                            
+                            // 注意：不加 Z_TRY_ADDREF，ZVAL_COPY_VALUE 只是借用指针
+                            // zval_ptr_dtor 在循环末尾负责释放（refcount 1→0）
+
                             zend_try {
                                 // 清除之前可能残留的异常
                                 if (EG(exception)) {
@@ -1998,9 +1999,9 @@ PHP_METHOD(ExoSip, run) {
                     }
                     
                     // 执行事件回调
-                    // 注意：回调函数会接收对象的引用，需要增加引用计数
-                    Z_TRY_ADDREF(sip_event_obj);
-                    
+                    // 注意：不加 Z_TRY_ADDREF，ZVAL_COPY_VALUE 只是借用指针
+                    // zval_ptr_dtor 在循环末尾负责释放（refcount 1→0）
+
                     zend_try {
                         zval result = php_exosip_call_event_handler(callback, &sip_event_obj);
                         
