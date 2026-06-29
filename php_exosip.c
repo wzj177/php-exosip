@@ -1832,10 +1832,15 @@ PHP_METHOD(ExoSip, run) {
                         
                         zval_ptr_dtor(&sip_event_obj);
                     } ZEND_HASH_FOREACH_END();
-                    
-                    zval_ptr_dtor(&events_array);
                 }
-                
+
+                // events_array 由 exosip_get_events_nonblocking() 无条件 array_init，
+                // 即使 event_count==0（空轮询，最高频路径）也分配了空 HashTable。
+                // 释放必须放在 if(event_count>0) 块外，否则每次空轮询泄漏一个空数组，
+                // Worker 100ms 轮询一次 → 每秒漏 ~10 个 → RSS 持续增长直至 OOM。
+                // （与单进程循环 line ~2035 的写法保持一致）
+                zval_ptr_dtor(&events_array);
+
                 // Check timer (with exception protection)
                 if (obj->ctx->timer_interval_ms > 0 && sip_check_and_fire_timer(obj->ctx)) {
                     if (Z_TYPE(obj->onTimer) == IS_OBJECT) {
