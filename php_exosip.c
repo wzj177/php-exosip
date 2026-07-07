@@ -1331,6 +1331,11 @@ PHP_METHOD(ExoSip, init) {
     val = zend_hash_str_find(Z_ARRVAL_P(configArr), "long_task_worker_num", 20);
     obj->ctx->long_task_count = (val && Z_TYPE_P(val) == IS_LONG) ? (int)Z_LVAL_P(val) : 1;  // 默认 1
 
+    // 读取内存阈值（MB）：进程 RSS 超过此值时自重启，0 = 不限制
+    // Master 超限 → execv 重启整个 Gateway；Worker 由 PHP 层 tick 阈值 exit 后 Master fork 新进程
+    val = zend_hash_str_find(Z_ARRVAL_P(configArr), "max_memory_mb", 13);
+    obj->ctx->max_memory_mb = (val && Z_TYPE_P(val) == IS_LONG) ? (int)Z_LVAL_P(val) : 0;
+
     // Set global context for session close operations
     global_sip_ctx = obj->ctx;
     
