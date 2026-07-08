@@ -295,7 +295,12 @@ typedef struct _sip_context {
     zval pipe_message_callback;
     unsigned long pipe_msg_counter;  // 管道消息计数器
     int task_sockfd;                 // Task进程保存的socketpair fd
-    
+
+    // 内存阈值（MB）：进程 RSS 超过此值时触发自重启，0 = 不限制
+    // Worker 超限 → exit，Master fork 新 Worker
+    // Master 超限 → 杀子进程 + execv 重启整个 Gateway
+    int max_memory_mb;
+
     // 注意：订阅管理已移至 PHP/Redis 层，C 层不再维护订阅数组
     // C 层仅负责 SUBSCRIBE/NOTIFY 协议操作（需要 dialog_id）
     

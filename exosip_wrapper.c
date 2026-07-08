@@ -3573,9 +3573,94 @@ int sip_fork_long_task_workers(SipContext *ctx) {
     return 0;
 }
 
+// 读取当前进程的 RSS（单位 MB），读 /proc/self/status 的 VmRSS
+// 失败返回 0
+static size_t sip_get_self_rss_mb(void) {
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return 0;
+    char line[256];
+    long rss_kb = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "VmRSS:", 6) == 0) {
+            sscanf(line + 6, "%ld", &rss_kb);
+            break;
+        }
+    }
+    fclose(f);
+    return rss_kb > 0 ? (size_t)(rss_kb / 1024) : 0;
+}
+
+// 通过 execv 重新启动当前进程（读 /proc/self/cmdline 和 /proc/self/exe）
+// 成功不返回（进程被新镜像替换），失败返回
+static void sip_exec_restart_self(void) {
+    // 读取 /proc/self/cmdline（参数以 \0 分隔）
+    FILE *f = fopen("/proc/self/cmdline", "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0) { fclose(f); return; }
+
+    char *buf = (char *)malloc(size + 1);
+    if (!buf) { fclose(f); return; }
+    size_t nread = fread(buf, 1, size, f);
+    fclose(f);
+    if (nread <= 0) { free(buf); return; }
+    buf[nread] = '\0';
+
+    // 统计 argc（\0 分隔的字符串数）
+    int argc = 0;
+    for (long i = 0; i < (long)nread; i++) {
+        if (buf[i] == '\0') argc++;
+    }
+    if (argc == 0) { free(buf); return; }
+
+    // 构造 argv（指针指向 buf 内部）
+    char **argv = (char **)malloc((argc + 1) * sizeof(char *));
+    if (!argv) { free(buf); return; }
+    int idx = 0;
+    long pos = 0;
+    while (idx < argc && pos < (long)nread) {
+        argv[idx++] = buf + pos;
+        pos += strlen(buf + pos) + 1;
+    }
+    argv[argc] = NULL;
+
+    // 用 /proc/self/exe 的绝对路径替换 argv[0]，避免 PATH 查找问题
+    char exe_path[4096];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\0';
+        argv[0] = exe_path;
+        fprintf(stderr, "[Master] Restarting gateway via execv: %s\n", exe_path);
+    } else {
+        fprintf(stderr, "[Master] Restarting gateway via execvp (readlink failed)\n");
+    }
+
+    // execv 前关闭所有非标准 fd（socketpair/pipe/eXosip 内部 socket），
+    // 避免泄漏到新进程（新进程会重新创建自己的 fd）。
+    // stderr(2) 保留到此处打印完日志后再被 close。
+    int maxfd = (int)sysconf(_SC_OPEN_MAX);
+    if (maxfd <= 0) maxfd = 8192;
+    for (int fd = 3; fd < maxfd; fd++) close(fd);
+
+    if (len > 0) {
+        execv(exe_path, argv);
+    } else {
+        execvp("php", argv);
+    }
+
+    // 到这里说明 exec 失败
+    perror("[Master] execv/execvp failed");
+    free(argv);
+    free(buf);
+}
+
 void sip_master_loop(SipContext *ctx) {
     fprintf(stderr, "[Master] Entering monitor loop\n");
-    
+
+    time_t last_mem_check = 0;
+
     while (!g_shutdown_flag) {
         if (g_worker_died) {
             fprintf(stderr, "[Master] Restarting worker\n");
@@ -3588,10 +3673,49 @@ void sip_master_loop(SipContext *ctx) {
             
             g_worker_died = 0;
         }
-        
+
+        // 内存阈值自重启（每 30 秒检查一次）
+        // Master 是顶层进程无人拉起，超限时必须 execv 重启整个 Gateway
+        if (ctx->max_memory_mb > 0) {
+            time_t now = time(NULL);
+            if (now - last_mem_check >= 30) {
+                last_mem_check = now;
+                size_t rss = sip_get_self_rss_mb();
+                if (rss > 0 && rss >= (size_t)ctx->max_memory_mb) {
+                    fprintf(stderr, "[Master] Memory limit exceeded: RSS=%zuMB >= limit=%dMB, restarting gateway\n",
+                            rss, ctx->max_memory_mb);
+
+                    // 优雅杀子进程
+                    if (ctx->worker_pid > 0) kill(ctx->worker_pid, SIGTERM);
+                    for (int i = 0; i < ctx->task_count; i++) {
+                        if (ctx->task_pids[i] > 0) kill(ctx->task_pids[i], SIGTERM);
+                    }
+                    sleep(2);
+                    // 强制清理未退出的子进程
+                    if (ctx->worker_pid > 0) kill(ctx->worker_pid, SIGKILL);
+                    for (int i = 0; i < ctx->task_count; i++) {
+                        if (ctx->task_pids[i] > 0) kill(ctx->task_pids[i], SIGKILL);
+                    }
+                    // 回收僵尸进程
+                    while (waitpid(-1, NULL, WNOHANG) > 0) {}
+
+                    // 删除 PID 文件，避免新进程检测到"已在运行"
+                    if (ctx->pid_file[0]) {
+                        unlink(ctx->pid_file);
+                    }
+
+                    // execv 重启整个 Gateway（端口由新 Worker 重新绑定）
+                    sip_exec_restart_self();
+                    // execv 失败才会到这里，正常退出由外层处理
+                    g_shutdown_flag = 1;
+                    break;
+                }
+            }
+        }
+
         sleep(1);
     }
-    
+
     fprintf(stderr, "[Master] Shutting down\n");
     
     // 先通知 Worker（Worker 会清理自己的 Long Task 进程）
